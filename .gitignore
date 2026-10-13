@@ -1,0 +1,13 @@
+# Local account credentials and runtime logs
+/data/
+/.test-credential.xml
+/.publish/
+*.log
+*.log.old
+
+# Editor and temporary files
+.vscode/
+*.tmp
+*.bak
+Thumbs.db
+Desktop.ini
