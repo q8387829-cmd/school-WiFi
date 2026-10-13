@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-    [ValidateSet('Run', 'Setup', 'Check', 'Stop', 'EnableStartup', 'DisableStartup', 'Forget')]
+    [ValidateSet('Run', 'Setup', 'Check', 'CheckCredential', 'Stop', 'EnableStartup', 'DisableStartup', 'Forget')]
     [string]$Mode = 'Run',
     [switch]$NonInteractive
 )
@@ -38,7 +38,7 @@ function Set-CampusCredential {
     if ($password.Length -eq 0) { throw '密码不能为空。' }
     if (-not (Test-Path -LiteralPath $dataDirectory)) { New-Item -ItemType Directory -Path $dataDirectory | Out-Null }
     $credential = New-Object System.Management.Automation.PSCredential($account, $password)
-    $credential | Export-Clixml -LiteralPath $credentialPath -Encoding UTF8
+    Save-CampusCredential $credentialPath $credential
     Write-Host '配置已保存。运行“启动自动重连.cmd”即可持续监测。'
 }
 
@@ -56,6 +56,12 @@ function Get-CampusStartupPath {
 try {
     switch ($Mode) {
         'Setup' { Set-CampusCredential; exit 0 }
+        'CheckCredential' {
+            [void](Read-CampusCredential $credentialPath)
+            Write-Host '账号记录正常：账号和密码已保存，当前 Windows 用户可以读取。'
+            Write-Host '该检查不向校园网提交登录，也不显示账号或密码。'
+            exit 0
+        }
         'Stop' { Send-CampusStop; exit 0 }
         'Forget' {
             Send-CampusStop
@@ -64,7 +70,7 @@ try {
             exit 0
         }
         'EnableStartup' {
-            if (-not (Test-Path -LiteralPath $credentialPath)) { throw '请先运行“首次配置.cmd”。' }
+            [void](Read-CampusCredential $credentialPath)
             $shell = New-Object -ComObject WScript.Shell
             $shortcut = $shell.CreateShortcut((Get-CampusStartupPath))
             $shortcut.TargetPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -104,26 +110,23 @@ try {
             if ($NonInteractive) { Write-CampusLog '缺少账号配置，请运行首次配置。'; exit 2 }
             Set-CampusCredential
         }
-        try { $credential = Import-Clixml -LiteralPath $credentialPath } catch { throw '无法解密已保存的账号密码，请用当前 Windows 用户重新运行首次配置。' }
-        if ($credential -isnot [pscredential]) { throw '账号配置文件无效，请重新运行首次配置。' }
+        $credential = Read-CampusCredential $credentialPath
         $stop = New-Object Threading.EventWaitHandle($false, [Threading.EventResetMode]::ManualReset, $stopName)
         [void]$stop.Reset()
         $state = New-CampusMonitorState
         $lastStatus = ''
-        Write-CampusLog '自动重连已启动：每 30 秒检查认证，连续两次未认证才提交登录。'
+        Write-CampusLog '账号记录读取正常。自动重连已启动：每 5 秒检查认证，首次确认未登录就立即提交登录。'
         while (-not $stop.WaitOne(0)) {
             $snapshot = Get-CampusSnapshot $client
             if ($snapshot.State -ne $lastStatus) {
-                $message = switch ($snapshot.State) { 'Online' { '已认证，保持监测。' } 'Offline' { '未认证，等待第二次确认。' } default { '认证接口不可用或状态不明确，等待网络恢复。' } }
+                $message = switch ($snapshot.State) { 'Online' { '已认证，保持监测。' } 'Offline' { '检测到未登录。' } default { '认证接口不可用或状态不明确，等待网络恢复。' } }
                 Write-CampusLog $message
                 $lastStatus = $snapshot.State
             }
             $action = Get-CampusAction $state $snapshot.State ([datetime]::UtcNow)
             if ($action -eq 'Login' -and -not $stop.WaitOne(0)) {
-                # Refresh once more before submitting, to avoid racing a manual login.
-                $snapshot = Get-CampusSnapshot $client
-                if ($snapshot.State -ne 'Offline') { [void](Get-CampusAction $state $snapshot.State ([datetime]::UtcNow)); continue }
-                Write-CampusLog '确认认证已失效，尝试重新登录。'
+                $credential = Read-CampusCredential $credentialPath
+                Write-CampusLog '检测到认证已失效，立即使用最新保存的账号记录登录。'
                 $login = Invoke-CampusLogin $client $snapshot $credential
                 if ($login.Stop) { Write-CampusLog $login.Reason; break }
                 if ($login.Accepted) {
@@ -142,7 +145,7 @@ try {
                     Write-CampusLog ($login.Reason + ' ' + $delay + ' 秒后再试。')
                 }
             }
-            if ($stop.WaitOne(30000)) { break }
+            if ($stop.WaitOne(5000)) { break }
         }
         Write-CampusLog '自动重连已停止。'
     } finally {

@@ -1,5 +1,34 @@
 ﻿Set-StrictMode -Version 2.0
 
+function Read-CampusCredential([string]$Path) {
+    try {
+        $credential = Import-Clixml -LiteralPath $Path -ErrorAction Stop
+        if ($credential -isnot [pscredential] -or [string]::IsNullOrWhiteSpace($credential.UserName) -or
+            $credential.Password.Length -eq 0) { throw 'Invalid credential record' }
+        return $credential
+    } catch {
+        throw '账号记录缺失、无效或无法解密，请用当前 Windows 用户重新运行首次配置。'
+    }
+}
+
+function Save-CampusCredential([string]$Path, [pscredential]$Credential) {
+    if ([string]::IsNullOrWhiteSpace($Credential.UserName) -or $Credential.Password.Length -eq 0) {
+        throw '账号和密码不能为空。'
+    }
+    $temporaryPath = $Path + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+    try {
+        $Credential | Export-Clixml -LiteralPath $temporaryPath -Encoding UTF8 -ErrorAction Stop
+        [void](Read-CampusCredential $temporaryPath)
+        if (Test-Path -LiteralPath $Path) {
+            [IO.File]::Replace($temporaryPath, $Path, [NullString]::Value)
+        } else {
+            [IO.File]::Move($temporaryPath, $Path)
+        }
+    } finally {
+        if (Test-Path -LiteralPath $temporaryPath) { Remove-Item -LiteralPath $temporaryPath -Force }
+    }
+}
+
 function New-CampusHttpClient {
     Add-Type -AssemblyName System.Net.Http
     $handler = New-Object System.Net.Http.HttpClientHandler
@@ -137,17 +166,15 @@ function Get-CampusSnapshot($Client) {
 }
 
 function New-CampusMonitorState {
-    return [pscustomobject]@{ OfflineCount = 0; Failures = 0; NextAttempt = [datetime]::MinValue }
+    return [pscustomobject]@{ Failures = 0; NextAttempt = [datetime]::MinValue }
 }
 
 function Get-CampusAction($State, [string]$Status, [datetime]$Now) {
     if ($Status -eq 'Online') {
-        $State.OfflineCount = 0; $State.Failures = 0; $State.NextAttempt = [datetime]::MinValue
+        $State.Failures = 0; $State.NextAttempt = [datetime]::MinValue
         return 'Wait'
     }
-    if ($Status -ne 'Offline') { $State.OfflineCount = 0; return 'Wait' }
-    $State.OfflineCount = [Math]::Min(2, $State.OfflineCount + 1)
-    if ($State.OfflineCount -ge 2 -and $Now -ge $State.NextAttempt) { return 'Login' }
+    if ($Status -eq 'Offline' -and $Now -ge $State.NextAttempt) { return 'Login' }
     return 'Wait'
 }
 
@@ -155,7 +182,6 @@ function Set-CampusFailure($State, [datetime]$Now) {
     $State.Failures++
     $delay = if ($State.Failures -ge 3) { 900 } else { 60 * [Math]::Pow(2, $State.Failures - 1) }
     $State.NextAttempt = $Now.AddSeconds($delay)
-    $State.OfflineCount = 0
     return [int]$delay
 }
 

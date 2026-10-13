@@ -40,11 +40,10 @@ Assert-Campus ((ConvertTo-CampusIpNumber '10.59.2.212') -eq 171639508) 'Match br
 
 $now = [datetime]::UtcNow
 $state = New-CampusMonitorState
-Assert-Campus ((Get-CampusAction $state 'Offline' $now) -eq 'Wait') 'One offline observation does not trigger login'
-Assert-Campus ((Get-CampusAction $state 'Offline' $now) -eq 'Login') 'Two consecutive offline observations trigger login'
-Assert-Campus ((Get-CampusAction $state 'Unknown' $now) -eq 'Wait' -and $state.OfflineCount -eq 0) 'Unknown state resets offline confirmation'
-[void](Get-CampusAction $state 'Offline' $now)
-Assert-Campus ((Get-CampusAction $state 'Online' $now) -eq 'Wait' -and $state.OfflineCount -eq 0) 'Online state prevents duplicate login'
+Assert-Campus ((Get-CampusAction $state 'Offline' $now) -eq 'Login') 'First offline observation immediately triggers login'
+Assert-Campus ((Get-CampusAction $state 'Unknown' $now) -eq 'Wait') 'Unknown status does not trigger credential submission'
+Assert-Campus ((Get-CampusAction $state 'Offline' $now) -eq 'Login') 'First offline observation after network recovery immediately triggers login'
+Assert-Campus ((Get-CampusAction $state 'Online' $now) -eq 'Wait') 'Online state prevents duplicate login'
 Assert-Campus ((Set-CampusFailure $state $now) -eq 60) 'First failed login waits 60 seconds'
 [void](Get-CampusAction $state 'Offline' $now)
 Assert-Campus ((Get-CampusAction $state 'Offline' $now.AddSeconds(59)) -eq 'Wait') 'Retry cooldown prevents excessive submissions'
@@ -109,9 +108,25 @@ Assert-Campus ((Get-CampusSnapshot $mock).State -eq 'Unknown') 'Unreachable port
 
 $temporaryCredential = Join-Path $PSScriptRoot '.test-credential.xml'
 try {
-    $credential | Export-Clixml -LiteralPath $temporaryCredential -Encoding UTF8
+    Save-CampusCredential $temporaryCredential $credential
     $stored = Get-Content -LiteralPath $temporaryCredential -Raw
-    $restored = Import-Clixml -LiteralPath $temporaryCredential
+    $restored = Read-CampusCredential $temporaryCredential
     Assert-Campus ($stored -notmatch 'fake' -and $restored.GetNetworkCredential().Password -eq 'fake &+=?#中文') 'Windows DPAPI encrypts saved password and decrypts for same user'
+    $replacement = New-Object Management.Automation.PSCredential('newtest@cmcc', (ConvertTo-SecureString 'new fake password' -AsPlainText -Force))
+    Save-CampusCredential $temporaryCredential $replacement
+    $latest = Read-CampusCredential $temporaryCredential
+    Assert-Campus ($latest.UserName -eq 'newtest@cmcc' -and $latest.GetNetworkCredential().Password -eq 'new fake password') 'Existing credential record can be updated and reloaded'
+    Assert-Campus (@(Get-ChildItem -LiteralPath $PSScriptRoot -Filter '.test-credential.xml.*.tmp').Count -eq 0) 'Saving credentials leaves no temporary record behind'
+    [IO.File]::WriteAllText($temporaryCredential, 'invalid credential data')
+    $rejected = $false
+    try { Read-CampusCredential $temporaryCredential | Out-Null } catch { $rejected = $true }
+    Assert-Campus $rejected 'Corrupted credential records are rejected'
+    $emptyAccount = New-Object Management.Automation.PSCredential(' ', (ConvertTo-SecureString 'fake' -AsPlainText -Force))
+    $rejected = $false
+    try { Save-CampusCredential $temporaryCredential $emptyAccount } catch { $rejected = $true }
+    Assert-Campus $rejected 'Blank saved account is rejected'
 } finally { if (Test-Path -LiteralPath $temporaryCredential) { Remove-Item -LiteralPath $temporaryCredential -Force } }
+$rejected = $false
+try { Read-CampusCredential $temporaryCredential | Out-Null } catch { $rejected = $true }
+Assert-Campus $rejected 'Missing credential record gives a configuration error'
 Write-Host ('All ' + $script:testCount + ' checks passed. No real credentials submitted.')
