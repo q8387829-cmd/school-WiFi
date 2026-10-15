@@ -32,6 +32,7 @@ if (-not [string]::IsNullOrWhiteSpace($PreviewPath)) {
         Show-CampusUiPage $previewUi $PreviewPage
         $previewUi.Form.ShowInTaskbar = $false
         $previewUi.Form.Show()
+        [void]$previewUi.Navigation[$PreviewPage].Focus()
         $previewUi.Form.Refresh()
         [Windows.Forms.Application]::DoEvents()
         $bitmap = New-Object Drawing.Bitmap($previewUi.Form.Width, $previewUi.Form.Height)
@@ -65,10 +66,10 @@ namespace CampusNetwork {
 }
 
 function New-CampusStateIcon([string]$State) {
-    $color = '#147D73'
-    if ($State -eq 'LoggingIn') { $color = '#2875BD' }
-    if ($State -eq 'Error') { $color = '#D59128' }
-    if ($State -eq 'Stopped') { $color = '#7B8998' }
+    $color = '#34C759'
+    if ($State -eq 'LoggingIn') { $color = '#007AFF' }
+    if ($State -eq 'Error') { $color = '#FF9500' }
+    if ($State -eq 'Stopped') { $color = '#8E8E93' }
     $bitmap = New-Object Drawing.Bitmap(32, 32)
     $graphics = [Drawing.Graphics]::FromImage($bitmap)
     $brush = New-Object Drawing.SolidBrush((ConvertTo-CampusColor $color))
@@ -112,8 +113,8 @@ function New-CampusStateIcon([string]$State) {
 
 function Set-CampusFeedback([string]$Text, [switch]$ErrorState) {
     $script:ui.FeedbackLabel.Text = $Text
-    $script:ui.FeedbackLabel.ForeColor = ConvertTo-CampusColor '#147D73'
-    if ($ErrorState) { $script:ui.FeedbackLabel.ForeColor = ConvertTo-CampusColor '#B55132' }
+    $script:ui.FeedbackLabel.ForeColor = ConvertTo-CampusColor '#248A3D'
+    if ($ErrorState) { $script:ui.FeedbackLabel.ForeColor = ConvertTo-CampusColor '#C66A00' }
 }
 
 function Show-CampusWindow([string]$Page = '') {
