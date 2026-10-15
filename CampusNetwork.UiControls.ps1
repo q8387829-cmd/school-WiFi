@@ -10,6 +10,40 @@ using System.Drawing.Drawing2D;
 using System.Windows.Forms;
 
 namespace CampusNetwork.UI {
+    // WinForms can leave ShowFocusCues/default-button emphasis enabled after a
+    // mouse click. Track the actual input method so only keyboard navigation
+    // draws focus outlines. The filter holds no controls and lives once per UI thread.
+    internal sealed class KeyboardFocusTracker : IMessageFilter {
+        [ThreadStatic] private static KeyboardFocusTracker current;
+        private bool keyboardNavigation;
+        internal static bool Visible {
+            get { EnsureInstalled(); return current.keyboardNavigation; }
+        }
+        internal static void EnsureInstalled() {
+            if (current == null) {
+                current = new KeyboardFocusTracker();
+                Application.AddMessageFilter(current);
+            }
+        }
+        public bool PreFilterMessage(ref Message message) {
+            bool next = keyboardNavigation;
+            if (message.Msg == 0x0100 || message.Msg == 0x0104) {
+                Keys key = (Keys)(message.WParam.ToInt64() & 0xffff);
+                if (message.Msg == 0x0104 || key == Keys.Tab || key == Keys.Left || key == Keys.Right ||
+                    key == Keys.Up || key == Keys.Down || key == Keys.Home || key == Keys.End ||
+                    key == Keys.Space || key == Keys.Enter) { next = true; }
+            } else if (message.Msg == 0x0201 || message.Msg == 0x0204 || message.Msg == 0x0207 || message.Msg == 0x020B) {
+                next = false;
+            }
+            if (next != keyboardNavigation) {
+                keyboardNavigation = next;
+                Control control = Control.FromHandle(message.HWnd);
+                if (control != null && control.TopLevelControl != null) { control.TopLevelControl.Invalidate(true); }
+            }
+            return false;
+        }
+    }
+
     internal static class DrawingTools {
         internal static GraphicsPath Rounded(RectangleF rectangle, float radius) {
             GraphicsPath path = new GraphicsPath();
@@ -81,13 +115,13 @@ namespace CampusNetwork.UI {
         private Color borderColor = Color.Transparent;
         private bool hover;
         private bool pressed;
-        private bool defaultButton;
         [DefaultValue(12)]
         public int Radius { get { return radius; } set { radius = Math.Max(0, value); Invalidate(); } }
         public Color AccentColor { get { return accentColor; } set { accentColor = value; Invalidate(); } }
         public Color DefaultColor { get { return BackColor; } set { BackColor = value; } }
         public Color BorderColor { get { return borderColor; } set { borderColor = value; Invalidate(); } }
         public RoundedButton() {
+            KeyboardFocusTracker.EnsureInstalled();
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw |
                 ControlStyles.SupportsTransparentBackColor, true);
@@ -99,7 +133,9 @@ namespace CampusNetwork.UI {
             Size = new Size(132, 42);
             AccessibleRole = AccessibleRole.PushButton;
         }
-        protected override void OnPaintBackground(PaintEventArgs e) { e.Graphics.Clear(DrawingTools.ParentColor(this)); }
+        protected override void OnPaintBackground(PaintEventArgs e) {
+            using (SolidBrush parent = new SolidBrush(DrawingTools.ParentColor(this))) { e.Graphics.FillRectangle(parent, ClientRectangle); }
+        }
         protected override void OnPaint(PaintEventArgs e) {
             DrawingTools.Prepare(e.Graphics);
             float scale = e.Graphics.DpiX / 96f;
@@ -123,11 +159,11 @@ namespace CampusNetwork.UI {
                     using (Pen border = new Pen(borderColor, Math.Max(1, scale))) { e.Graphics.DrawPath(border, path); }
                 }
             }
-            if (Enabled && ((Focused && ShowFocusCues) || defaultButton)) {
+            if (Enabled && Focused && KeyboardFocusTracker.Visible) {
                 RectangleF focusBounds = new RectangleF(0.75f * scale, 0.75f * scale,
                     Math.Max(0, Width - 1.5f * scale), Math.Max(0, Height - 1.5f * scale));
                 using (GraphicsPath focus = DrawingTools.Rounded(focusBounds, (radius + 2) * scale)) {
-                    using (Pen pen = new Pen(Color.FromArgb(Focused && ShowFocusCues ? 155 : 75, accentColor), 1.5f * scale)) {
+                    using (Pen pen = new Pen(Color.FromArgb(155, accentColor), 1.5f * scale)) {
                         e.Graphics.DrawPath(pen, focus);
                     }
                 }
@@ -159,7 +195,7 @@ namespace CampusNetwork.UI {
         protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
         protected override void OnLostFocus(EventArgs e) { pressed = false; Invalidate(); base.OnLostFocus(e); }
         protected override void OnEnabledChanged(EventArgs e) { hover = false; pressed = false; Invalidate(); base.OnEnabledChanged(e); }
-        public override void NotifyDefault(bool value) { defaultButton = value; Invalidate(); base.NotifyDefault(value); }
+        public override void NotifyDefault(bool value) { base.NotifyDefault(value); Invalidate(); }
     }
 
     public class ToggleSwitch : CheckBox {
@@ -170,6 +206,7 @@ namespace CampusNetwork.UI {
         private readonly Timer animation;
         public Color AccentColor { get { return accentColor; } set { accentColor = value; Invalidate(); } }
         public ToggleSwitch() {
+            KeyboardFocusTracker.EnsureInstalled();
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw |
                 ControlStyles.SupportsTransparentBackColor, true);
@@ -194,7 +231,9 @@ namespace CampusNetwork.UI {
             Invalidate();
             base.OnCheckedChanged(e);
         }
-        protected override void OnPaintBackground(PaintEventArgs e) { e.Graphics.Clear(DrawingTools.ParentColor(this)); }
+        protected override void OnPaintBackground(PaintEventArgs e) {
+            using (SolidBrush parent = new SolidBrush(DrawingTools.ParentColor(this))) { e.Graphics.FillRectangle(parent, ClientRectangle); }
+        }
         protected override void OnPaint(PaintEventArgs e) {
             DrawingTools.Prepare(e.Graphics);
             float scale = e.Graphics.DpiX / 96f;
@@ -216,7 +255,7 @@ namespace CampusNetwork.UI {
             shadow.Offset(0, 1 * scale);
             using (SolidBrush shadowBrush = new SolidBrush(Color.FromArgb(25, 0, 0, 0))) { e.Graphics.FillEllipse(shadowBrush, shadow); }
             using (SolidBrush thumbBrush = new SolidBrush(Enabled ? Color.White : Color.FromArgb(247, 247, 249))) { e.Graphics.FillEllipse(thumbBrush, thumb); }
-            if (Focused && ShowFocusCues && Enabled) {
+            if (Focused && KeyboardFocusTracker.Visible && Enabled) {
                 RectangleF focusBounds = track;
                 focusBounds.Inflate(1.5f * scale, 1.5f * scale);
                 using (GraphicsPath focusPath = DrawingTools.Rounded(focusBounds, focusBounds.Height / 2)) {
@@ -246,6 +285,7 @@ namespace CampusNetwork.UI {
         public Color AccentColor { get { return accentColor; } set { accentColor = value; Invalidate(); } }
         public Color BorderColor { get { return borderColor; } set { borderColor = value; Invalidate(); } }
         public RoundedComboBox() {
+            KeyboardFocusTracker.EnsureInstalled();
             DrawMode = DrawMode.OwnerDrawFixed;
             DropDownStyle = ComboBoxStyle.DropDownList;
             FlatStyle = FlatStyle.Flat;
@@ -279,7 +319,7 @@ namespace CampusNetwork.UI {
             RectangleF bounds = new RectangleF(0.5f, 0.5f, Width - 1, Height - 1);
             using (GraphicsPath path = DrawingTools.Rounded(bounds, radius * scale)) {
                 using (SolidBrush fill = new SolidBrush(BackColor)) { graphics.FillPath(fill, path); }
-                Color outline = Focused && ShowFocusCues && Enabled ? Color.FromArgb(120, accentColor) : borderColor;
+                Color outline = Focused && KeyboardFocusTracker.Visible && Enabled ? Color.FromArgb(120, accentColor) : borderColor;
                 if (outline.A > 0) { using (Pen border = new Pen(outline, Math.Max(1, scale))) { graphics.DrawPath(border, path); } }
             }
             Color textColor = Enabled ? ForeColor : Color.FromArgb(170, 170, 176);
