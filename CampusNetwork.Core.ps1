@@ -1,5 +1,7 @@
 ﻿Set-StrictMode -Version 2.0
 
+. (Join-Path $PSScriptRoot 'CampusNetwork.Diagnostics.ps1')
+
 function Read-CampusCredential([string]$Path) {
     try {
         $credential = Import-Clixml -LiteralPath $Path -ErrorAction Stop
@@ -68,19 +70,37 @@ function Invoke-CampusJsonp($Client, [string]$Endpoint, [System.Collections.IDic
         'http://10.10.102.50:801/eportal/portal/online_list',
         'http://10.10.102.50:801/eportal/portal/login'
     )
-    if ($Endpoint -notin $allowed) { throw '不允许访问未知认证接口。' }
+    if ($Endpoint -notin $allowed) { Throw-CampusFault 'EndpointNotAllowed' 'Request' }
+    $stage = switch ($Endpoint) {
+        'http://10.10.102.50/drcom/chkstatus' { 'KernelStatus' }
+        'http://10.10.102.50:801/eportal/portal/page/loadConfig' { 'PortalConfig' }
+        'http://10.10.102.50:801/eportal/portal/online_list' { 'SessionList' }
+        default { 'Login' }
+    }
     $params = [ordered]@{ callback = 'campusCallback'; jsVersion = '4.X' }
     foreach ($key in $Data.Keys) { $params[$key] = $Data[$key] }
     $response = $null
     try {
         $uri = $Endpoint + '?' + (ConvertTo-CampusQuery $params)
         $response = $Client.GetAsync($uri).GetAwaiter().GetResult()
-        if (-not $response.IsSuccessStatusCode) { throw '请求未成功。' }
+        if (-not $response.IsSuccessStatusCode) {
+            $status = [int]$response.StatusCode
+            $code = if ($status -ge 300 -and $status -lt 400) { 'UnexpectedRedirect' }
+                elseif ($status -in @(401, 403)) { 'HttpAccessDenied' }
+                elseif ($status -eq 407) { 'ProxyRequired' }
+                elseif ($status -eq 429) { 'RateLimited' }
+                elseif ($status -ge 500) { 'ServerError' }
+                elseif ($status -eq 404) { 'EndpointNotFound' }
+                else { 'HttpError' }
+            Throw-CampusFault $code $stage $status
+        }
         $bytes = $response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
-        return ConvertFrom-CampusJsonp ([Text.Encoding]::UTF8.GetString($bytes))
+        try { return ConvertFrom-CampusJsonp ([Text.Encoding]::UTF8.GetString($bytes)) }
+        catch { Throw-CampusFault 'InvalidResponse' $stage }
     } catch {
         # Exception messages from HTTP libraries may include a password-bearing URL.
-        throw '校园网接口不可用或返回格式异常。'
+        $fault = Get-CampusFault $_
+        Throw-CampusFault $fault.Code $stage $fault.HttpStatus
     } finally {
         if ($null -ne $response) { $response.Dispose() }
         $uri = $null
@@ -97,25 +117,21 @@ function ConvertTo-CampusIpNumber([string]$Ip) {
     return ([uint64]$b[0] * 16777216 + [uint64]$b[1] * 65536 + [uint64]$b[2] * 256 + $b[3])
 }
 
-function Get-CampusTerminal($CoreStatus) {
+function Get-CampusTerminal($CoreStatus, $Network = $null) {
     $ip = ''
     foreach ($name in @('v4ip', 'v46ip', 'ss5')) {
         $candidate = [string](Get-CampusField $CoreStatus $name)
         if ($candidate -match '^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$') { $ip = $candidate; break }
     }
-    if (-not $ip) { throw '认证接口未提供本机地址，等待网络恢复。' }
-    foreach ($adapter in [Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
-        if ($adapter.OperationalStatus -ne [Net.NetworkInformation.OperationalStatus]::Up) { continue }
-        foreach ($address in $adapter.GetIPProperties().UnicastAddresses) {
-            if ($address.Address.ToString() -ne $ip) { continue }
-            $mac = $adapter.GetPhysicalAddress().ToString()
-            if ($mac -notmatch '^[0-9A-Fa-f]{12}$') { continue }
-            $v6 = [string](Get-CampusField $CoreStatus 'myv6ip')
-            if ($v6 -eq '::') { $v6 = '' }
-            return [pscustomobject]@{ Ip = $ip; Mac = $mac.ToUpperInvariant(); Ipv6 = $v6 }
-        }
+    if (-not $ip) { Throw-CampusFault 'PortalAddressMissing' 'LocalNetwork' }
+    if ($null -eq $Network) { $Network = Get-CampusNetworkContext }
+    foreach ($adapter in $Network.Adapters) {
+        if (-not $adapter.IsUp -or -not $adapter.IsLocal -or $ip -notin $adapter.Ipv4 -or $adapter.Mac -notmatch '^[0-9A-Fa-f]{12}$') { continue }
+        $v6 = [string](Get-CampusField $CoreStatus 'myv6ip')
+        if ($v6 -eq '::') { $v6 = '' }
+        return [pscustomobject]@{ Ip = $ip; Mac = $adapter.Mac; Ipv6 = $v6 }
     }
-    throw '本机网卡地址与认证接口不一致，等待校园网连接。'
+    Throw-CampusFault 'LocalAddressChanged' 'LocalNetwork'
 }
 
 function Get-CampusConfig($Client, $Terminal) {
@@ -127,16 +143,24 @@ function Get-CampusConfig($Client, $Terminal) {
     }
     $config = Get-CampusField $reply 'data' $null
     if ((Get-CampusField $reply 'code' 0) -ne 1 -or $null -eq $config) {
-        throw '无法读取校园网认证配置。'
+        Throw-CampusFault 'ConfigUnavailable' 'PortalConfig'
     }
     return $config
 }
 
-function Get-CampusSnapshot($Client) {
+function Get-CampusSnapshot($Client, $Network = $null) {
+    if ($null -eq $Network) { $Network = Get-CampusNetworkContext }
+    if (-not $Network.Known) { return New-CampusSnapshot 'Unknown' 'LocalInfoUnavailable' $Network -Stage 'LocalNetwork' }
+    if (-not $Network.HasLink) { return New-CampusSnapshot 'Unknown' 'NoLocalLink' $Network -Stage 'LocalNetwork' }
+    if (-not $Network.HasIpv4) { return New-CampusSnapshot 'Unknown' 'NoIpv4' $Network -Stage 'LocalNetwork' }
     try {
         $core = Invoke-CampusJsonp $Client 'http://10.10.102.50/drcom/chkstatus' @{}
-        $terminal = Get-CampusTerminal $core
+        $terminal = Get-CampusTerminal $core $Network
         $config = Get-CampusConfig $Client $terminal
+        if ((Get-CampusField $config 'login_method' -1) -notin @(1, 9) -or
+            (Get-CampusField $config 'en_md5' 0) -ne 0 -or (Get-CampusField $config 'password_cut' 0) -ne 0) {
+            Throw-CampusFault 'UnsupportedProtocol' 'PortalConfig'
+        }
         if ((Get-CampusField $config 'check_online_method' 0) -eq 1) {
             # This portal checks the RADIUS session list, rather than the Wi-Fi icon.
             $ipNumber = ConvertTo-CampusIpNumber $terminal.Ip
@@ -146,22 +170,28 @@ function Get-CampusSnapshot($Client) {
             }
             $result = [string](Get-CampusField $reply 'result' '-1')
             if ($result -eq '1' -and ($null -eq $reply.PSObject.Properties['list'] -or $null -eq $reply.list)) {
-                throw '在线接口缺少会话列表。'
+                Throw-CampusFault 'InvalidResponse' 'SessionList'
+            }
+            if ($result -eq '0' -and [string](Get-CampusField $reply 'msg') -match '服务器异常|系统繁忙|查询失败|数据库|超时|服务不可用|internal|timeout|busy|unavailable') {
+                Throw-CampusFault 'ServerError' 'SessionList'
             }
             $sessions = @(Get-CampusField $reply 'list' @())
             $owned = @($sessions | Where-Object { (Get-CampusField $_ 'online_ip') -eq $terminal.Ip })
             if ($result -eq '1' -and $owned.Count -gt 0) { $state = 'Online' }
             elseif ($result -eq '0' -or ($result -eq '1' -and $sessions.Count -eq 0)) { $state = 'Offline' }
-            else { throw '在线状态不明确。' }
+            elseif ($result -eq '1' -and $sessions.Count -gt 0) { Throw-CampusFault 'SessionMismatch' 'SessionList' }
+            else { Throw-CampusFault 'InvalidResponse' 'SessionList' }
         } else {
             $result = [string](Get-CampusField $core 'result' '-1')
             if ($result -eq '1') { $state = 'Online' }
             elseif ($result -eq '0') { $state = 'Offline' }
-            else { throw '在线状态不明确。' }
+            else { Throw-CampusFault 'InvalidResponse' 'KernelStatus' }
         }
-        return [pscustomobject]@{ State = $state; Terminal = $terminal; Config = $config }
+        $code = if ($state -eq 'Online') { 'Authenticated' } else { 'NotAuthenticated' }
+        return New-CampusSnapshot $state $code $Network $terminal $config
     } catch {
-        return [pscustomobject]@{ State = 'Unknown'; Terminal = $null; Config = $null }
+        $fault = Get-CampusFault $_
+        return New-CampusSnapshot 'Unknown' $fault.Code $Network -Stage $fault.Stage -HttpStatus $fault.HttpStatus
     }
 }
 
@@ -215,7 +245,9 @@ function Invoke-CampusLogin($Client, $Snapshot, [pscredential]$Credential) {
         $reason = if ($badCredential) { '需要检查账号、密码或验证码；已停止自动提交，请手动登录或重新配置。' } else { '登录未成功，稍后再试。' }
         return [pscustomobject]@{ Accepted = $accepted; Stop = $badCredential; Reason = $reason }
     } catch {
-        return [pscustomobject]@{ Accepted = $false; Stop = $false; Reason = '登录接口暂时不可用，稍后再试。' }
+        $fault = Get-CampusFault $_
+        $diagnostic = New-CampusSnapshot 'Unknown' $fault.Code (Get-CampusField $Snapshot 'Network' $null) -Stage $fault.Stage -HttpStatus $fault.HttpStatus
+        return [pscustomobject]@{ Accepted = $false; Stop = $false; Reason = (Format-CampusDiagnostic $diagnostic) }
     } finally {
         if ($null -ne $data) { $data['user_password'] = '' }
         $plainPassword = $null

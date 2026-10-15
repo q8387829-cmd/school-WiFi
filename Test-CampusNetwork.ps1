@@ -95,16 +95,20 @@ Assert-Campus ($login.Stop -and $mock.Requests.Count -eq 0) 'Unknown authenticat
 function Get-CampusTerminal($CoreStatus) { return [pscustomobject]@{ Ip = '10.9.8.7'; Mac = 'AABBCCDDEEFF'; Ipv6 = '' } }
 $coreResponse = 'campusCallback({"result":1,"v4ip":"10.9.8.7"})'
 $configResponse = 'campusCallback({"code":1,"data":{"login_method":1,"check_online_method":1}})'
+$mockNetwork = Get-CampusNetworkContext -Adapters @([pscustomobject]@{
+    Id = 'test-wifi'; IsUp = $true; IsLocal = $true; IsTunnel = $false
+    Ipv4 = @('10.9.8.7'); Gateways = @('10.9.8.1'); Mac = 'AABBCCDDEEFF'
+})
 $mock = New-MockCampusClient @($coreResponse, $configResponse, 'campusCallback({"result":1,"list":[],"total":0})')
-Assert-Campus ((Get-CampusSnapshot $mock).State -eq 'Offline') 'RADIUS offline status overrides stale core online state'
+Assert-Campus ((Get-CampusSnapshot $mock $mockNetwork).State -eq 'Offline') 'RADIUS offline status overrides stale core online state'
 $mock = New-MockCampusClient @($coreResponse, $configResponse, 'campusCallback({"result":1,"list":[{"online_ip":"10.9.8.7"}],"total":1})')
-Assert-Campus ((Get-CampusSnapshot $mock).State -eq 'Online') 'Recognize this device in online session list'
+Assert-Campus ((Get-CampusSnapshot $mock $mockNetwork).State -eq 'Online') 'Recognize this device in online session list'
 $mock = New-MockCampusClient @($coreResponse, $configResponse, 'campusCallback({"result":1,"list":[{"online_ip":"10.8.8.8"}],"total":1})')
-Assert-Campus ((Get-CampusSnapshot $mock).State -eq 'Unknown') 'Another device session does not justify login submission'
+Assert-Campus ((Get-CampusSnapshot $mock $mockNetwork).State -eq 'Unknown') 'Another device session does not justify login submission'
 $mock = New-MockCampusClient @($coreResponse, $configResponse, 'campusCallback({"result":1})')
-Assert-Campus ((Get-CampusSnapshot $mock).State -eq 'Unknown') 'Missing session list is not treated as an expired session'
+Assert-Campus ((Get-CampusSnapshot $mock $mockNetwork).State -eq 'Unknown') 'Missing session list is not treated as an expired session'
 $mock = New-MockCampusClient @()
-Assert-Campus ((Get-CampusSnapshot $mock).State -eq 'Unknown') 'Unreachable portal is not treated as an expired session'
+Assert-Campus ((Get-CampusSnapshot $mock $mockNetwork).State -eq 'Unknown') 'Unreachable portal is not treated as an expired session'
 
 $temporaryCredential = Join-Path $PSScriptRoot '.test-credential.xml'
 try {
