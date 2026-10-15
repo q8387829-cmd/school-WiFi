@@ -17,17 +17,12 @@ function New-CampusUiLabel {
 
 function New-CampusUiButton {
     param([string]$Text, [string]$Name, [switch]$Primary, [int]$Width = 132, [switch]$Navigation)
-    if ($Navigation) {
-        $button = New-Object CampusNetwork.UI.RoundedButton
-        $button.Radius = 12; $button.AccentColor = ConvertTo-CampusColor '#007AFF'
-    } else {
-        $button = New-Object Windows.Forms.Button
-        $button.FlatStyle = 'Flat'; $button.UseVisualStyleBackColor = $false
-        $button.FlatAppearance.BorderSize = 1
-        $button.FlatAppearance.BorderColor = ConvertTo-CampusColor '#D8D8DE'
-        $button.FlatAppearance.MouseOverBackColor = ConvertTo-CampusColor '#EFF4FC'
-        $button.FlatAppearance.MouseDownBackColor = ConvertTo-CampusColor '#DFEAF8'
-    }
+    $button = New-Object Windows.Forms.Button
+    $button.FlatStyle = 'Flat'; $button.UseVisualStyleBackColor = $false
+    $button.FlatAppearance.BorderSize = if ($Navigation) { 0 } else { 1 }
+    $button.FlatAppearance.BorderColor = ConvertTo-CampusColor '#D8D8DE'
+    $button.FlatAppearance.MouseOverBackColor = ConvertTo-CampusColor '#EFF4FC'
+    $button.FlatAppearance.MouseDownBackColor = ConvertTo-CampusColor '#DFEAF8'
     $button.Name = $Name; $button.Text = $Text
     $button.Size = New-Object Drawing.Size($Width, 38)
     $button.Margin = New-Object Windows.Forms.Padding(0, 0, 10, 0)
@@ -36,11 +31,9 @@ function New-CampusUiButton {
     $button.BackColor = [Drawing.Color]::White; $button.ForeColor = ConvertTo-CampusColor '#0065D4'
     if ($Primary) {
         $button.BackColor = ConvertTo-CampusColor '#007AFF'; $button.ForeColor = [Drawing.Color]::White
-        if (-not $Navigation) {
-            $button.FlatAppearance.BorderColor = $button.BackColor
-            $button.FlatAppearance.MouseOverBackColor = ConvertTo-CampusColor '#0070EB'
-            $button.FlatAppearance.MouseDownBackColor = ConvertTo-CampusColor '#0064D1'
-        }
+        $button.FlatAppearance.BorderColor = $button.BackColor
+        $button.FlatAppearance.MouseOverBackColor = ConvertTo-CampusColor '#0070EB'
+        $button.FlatAppearance.MouseDownBackColor = ConvertTo-CampusColor '#0064D1'
     }
     return $button
 }
@@ -351,7 +344,7 @@ function Show-CampusUiPage {
     foreach ($entry in $Ui.Pages.GetEnumerator()) { $entry.Value.Visible = $entry.Key -eq $Page }
     foreach ($entry in $Ui.Navigation.GetEnumerator()) {
         $selected = $entry.Key -eq $Page
-        $entry.Value.BackColor = ConvertTo-CampusColor $(if ($selected) { '#FFFFFF' } else { '#F7F7FA' })
+        $entry.Value.BackColor = ConvertTo-CampusColor $(if ($selected) { '#EAF2FF' } else { '#F7F7FA' })
         $entry.Value.ForeColor = ConvertTo-CampusColor $(if ($selected) { '#007AFF' } else { '#636369' })
         $Ui.NavigationGlyphs[$entry.Key].AccentColor = $entry.Value.ForeColor
     }
