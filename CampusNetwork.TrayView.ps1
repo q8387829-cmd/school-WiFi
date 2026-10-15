@@ -16,15 +16,32 @@ function New-CampusUiLabel {
 }
 
 function New-CampusUiButton {
-    param([string]$Text, [string]$Name, [switch]$Primary, [int]$Width = 132)
-    $button = New-Object CampusNetwork.UI.RoundedButton
-    $button.Name = $Name; $button.Text = $Text; $button.Radius = 12
-    $button.Size = New-Object Drawing.Size($Width, 42)
+    param([string]$Text, [string]$Name, [switch]$Primary, [int]$Width = 132, [switch]$Navigation)
+    if ($Navigation) {
+        $button = New-Object CampusNetwork.UI.RoundedButton
+        $button.Radius = 12; $button.AccentColor = ConvertTo-CampusColor '#007AFF'
+    } else {
+        $button = New-Object Windows.Forms.Button
+        $button.FlatStyle = 'Flat'; $button.UseVisualStyleBackColor = $false
+        $button.FlatAppearance.BorderSize = 1
+        $button.FlatAppearance.BorderColor = ConvertTo-CampusColor '#D8D8DE'
+        $button.FlatAppearance.MouseOverBackColor = ConvertTo-CampusColor '#EFF4FC'
+        $button.FlatAppearance.MouseDownBackColor = ConvertTo-CampusColor '#DFEAF8'
+    }
+    $button.Name = $Name; $button.Text = $Text
+    $button.Size = New-Object Drawing.Size($Width, 38)
     $button.Margin = New-Object Windows.Forms.Padding(0, 0, 10, 0)
     $button.Font = New-Object Drawing.Font('Microsoft YaHei UI', 10)
-    $button.AccentColor = ConvertTo-CampusColor '#007AFF'; $button.Cursor = 'Hand'
-    $button.BackColor = ConvertTo-CampusColor '#EAF2FF'; $button.ForeColor = ConvertTo-CampusColor '#0065D4'
-    if ($Primary) { $button.BackColor = ConvertTo-CampusColor '#007AFF'; $button.ForeColor = [Drawing.Color]::White }
+    $button.Cursor = 'Hand'
+    $button.BackColor = [Drawing.Color]::White; $button.ForeColor = ConvertTo-CampusColor '#0065D4'
+    if ($Primary) {
+        $button.BackColor = ConvertTo-CampusColor '#007AFF'; $button.ForeColor = [Drawing.Color]::White
+        if (-not $Navigation) {
+            $button.FlatAppearance.BorderColor = $button.BackColor
+            $button.FlatAppearance.MouseOverBackColor = ConvertTo-CampusColor '#0070EB'
+            $button.FlatAppearance.MouseDownBackColor = ConvertTo-CampusColor '#0064D1'
+        }
+    }
     return $button
 }
 
@@ -84,16 +101,20 @@ function New-CampusFieldWell($Control) {
 }
 
 function New-CampusPreferenceRow([string]$Title, [string]$Note, $Toggle) {
-    $row = New-CampusUiTable -Rows 1 -Columns 2
-    [void]$row.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Percent', 100)))
-    [void]$row.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Absolute', 62)))
-    $copy = New-CampusUiTable -Rows 2
-    Add-CampusUiRow $copy 27; Add-CampusUiRow $copy 23
-    [void]$copy.Controls.Add((New-CampusUiLabel $Title 10.5 '#1C1C1E'), 0, 0)
-    [void]$copy.Controls.Add((New-CampusUiLabel $Note 8.75 '#737378'), 0, 1)
-    $Toggle.Anchor = 'Right'; $Toggle.Margin = New-Object Windows.Forms.Padding(0)
+    $row = New-CampusUiTable -Rows 2
+    Add-CampusUiRow $row 27; Add-CampusUiRow $row 23
+    $Toggle.Dock = 'Fill'; $Toggle.Margin = New-Object Windows.Forms.Padding(0)
+    $Toggle.AutoSize = $false; $Toggle.FlatStyle = 'Flat'
+    $Toggle.ForeColor = ConvertTo-CampusColor '#007AFF'
+    $Toggle.BackColor = [Drawing.Color]::White
+    $Toggle.Font = New-Object Drawing.Font('Microsoft YaHei UI', 10.5)
+    $Toggle.FlatAppearance.CheckedBackColor = ConvertTo-CampusColor '#EAF2FF'
+    $Toggle.FlatAppearance.MouseOverBackColor = ConvertTo-CampusColor '#F4F7FC'
+    $Toggle.FlatAppearance.MouseDownBackColor = ConvertTo-CampusColor '#EAF2FF'
     $Toggle.AccessibleName = $Title; $Toggle.Text = $Title
-    [void]$row.Controls.Add($copy, 0, 0); [void]$row.Controls.Add($Toggle, 1, 0)
+    $description = New-CampusUiLabel $Note 8.75 '#737378'
+    $description.Padding = New-Object Windows.Forms.Padding(19, 0, 0, 0)
+    [void]$row.Controls.Add($Toggle, 0, 0); [void]$row.Controls.Add($description, 0, 1)
     return $row
 }
 
@@ -143,7 +164,7 @@ function New-CampusTrayView {
     $navItems = @(@('Status', '连接概览', 'Wifi'), @('Account', '账号与设置', 'Settings'), @('Diagnostics', '网络诊断', 'Diagnostics'), @('Logs', '运行日志', 'Logs'))
     $index = 2
     foreach ($item in $navItems) {
-        $button = New-CampusUiButton $item[1] ('nav' + $item[0]); $button.Dock = 'Fill'
+        $button = New-CampusUiButton $item[1] ('nav' + $item[0]) -Navigation; $button.Dock = 'Fill'
         $button.Margin = New-Object Windows.Forms.Padding(0, 4, 0, 4); $button.TextAlign = 'MiddleLeft'
         $button.Padding = New-Object Windows.Forms.Padding(42, 0, 0, 0)
         $button.BackColor = $nav.BackColor; $button.ForeColor = ConvertTo-CampusColor '#636369'; $button.Tag = $item[0]
@@ -256,7 +277,9 @@ function New-CampusTrayView {
     $ui.SaveButton = New-CampusUiButton '保存账号' 'saveButton' -Primary -Width 118
     $ui.ClearCredentialButton = New-CampusUiButton '清除账号' 'clearCredentialButton' -Width 118
     $ui.ClearCredentialButton.BackColor = ConvertTo-CampusColor '#FFF0EF'; $ui.ClearCredentialButton.ForeColor = ConvertTo-CampusColor '#D92D25'
-    $ui.ClearCredentialButton.AccentColor = ConvertTo-CampusColor '#FF3B30'
+    $ui.ClearCredentialButton.FlatAppearance.BorderColor = ConvertTo-CampusColor '#F3DAD8'
+    $ui.ClearCredentialButton.FlatAppearance.MouseOverBackColor = ConvertTo-CampusColor '#FFE4E2'
+    $ui.ClearCredentialButton.FlatAppearance.MouseDownBackColor = ConvertTo-CampusColor '#FFD5D1'
     [void]$saveActions.Controls.Add($ui.SaveButton); [void]$saveActions.Controls.Add($ui.ClearCredentialButton)
     [void]$accountTable.Controls.Add($saveActions, 1, 3); [void]$accountCard.Controls.Add($accountTable)
     [void]$accountPage.Controls.Add($accountCard, 0, 1)
@@ -264,8 +287,8 @@ function New-CampusTrayView {
     $preferenceCard = New-CampusUiCard -Padding 18
     $preferences = New-CampusUiTable -Rows 2
     Add-CampusUiRow $preferences 50 -Percent; Add-CampusUiRow $preferences 50 -Percent
-    $ui.StartupCheckBox = New-Object CampusNetwork.UI.ToggleSwitch; $ui.StartupCheckBox.Name = 'startupCheckBox'
-    $ui.MonitorOnLaunchCheckBox = New-Object CampusNetwork.UI.ToggleSwitch; $ui.MonitorOnLaunchCheckBox.Name = 'monitorOnLaunchCheckBox'
+    $ui.StartupCheckBox = New-Object Windows.Forms.CheckBox; $ui.StartupCheckBox.Name = 'startupCheckBox'
+    $ui.MonitorOnLaunchCheckBox = New-Object Windows.Forms.CheckBox; $ui.MonitorOnLaunchCheckBox.Name = 'monitorOnLaunchCheckBox'
     [void]$preferences.Controls.Add((New-CampusPreferenceRow '登录 Windows 后启动' '在托盘中安静运行，随时查看连接状态。' $ui.StartupCheckBox), 0, 0)
     [void]$preferences.Controls.Add((New-CampusPreferenceRow '打开助手时自动监测' '暂停后会记住你的选择，可随时手动开启。' $ui.MonitorOnLaunchCheckBox), 0, 1)
     [void]$preferenceCard.Controls.Add($preferences); [void]$accountPage.Controls.Add($preferenceCard, 0, 3)

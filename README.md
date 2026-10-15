@@ -13,7 +13,7 @@
 
 ## 托盘和设置
 
-设置窗口采用参考 iOS 的浅色界面，使用圆角分组、系统蓝按钮和绿色开关，集中呈现连接概览、账号设置、网络诊断及运行日志。
+设置窗口保留浅色主题和圆角分组，操作按钮与设置复选框采用原有的平面样式，并使用当前主题的蓝色配色，集中呈现连接概览、账号设置、网络诊断及运行日志。
 
 设置窗口集中显示认证状态、故障原因和建议，并提供账号保存、监测启停、立即检查、开机启动、网络诊断和日志查看。双击托盘图标可重新打开窗口；点击窗口右上角关闭只会隐藏窗口。要结束助手并停止监测，请使用托盘右键菜单的“退出”。退出不会删除账号记录或开机启动项。
 
@@ -59,7 +59,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-CampusService.ps1
 | `CampusNetwork.Diagnostics.ps1` | 本机连接判断、故障分类、端口探测和事件监听 |
 | `CampusNetwork.Tray.ps1` | 系统托盘和统一设置窗口 |
 | `CampusNetwork.TrayView.ps1` | 设置窗口控件和显示 |
-| `CampusNetwork.UiControls.ps1` | 圆角分组、按钮和开关等界面控件 |
+| `CampusNetwork.UiControls.ps1` | 圆角分组、导航、状态图标和账号选择等界面控件 |
 | `CampusNetwork.Service.ps1` | 本机设置、监测管理和开机启动 |
 | `Test-CampusNetwork.ps1` | 无需校园网连接的模拟测试 |
 | `Test-CampusDiagnostics.ps1` | 故障响应和系统事件测试 |
