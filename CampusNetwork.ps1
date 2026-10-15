@@ -1,17 +1,36 @@
 ﻿[CmdletBinding()]
 param(
-    [ValidateSet('Run', 'Setup', 'Check', 'Diagnose', 'CheckCredential', 'Stop', 'EnableStartup', 'DisableStartup', 'Forget')]
+    [ValidateSet('Run', 'Setup', 'Check', 'Diagnose', 'DiagnoseJson', 'CheckCredential', 'Stop', 'EnableStartup', 'DisableStartup', 'Forget')]
     [string]$Mode = 'Run',
-    [switch]$NonInteractive
+    [switch]$NonInteractive,
+    [string]$ResultPath
 )
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot 'CampusNetwork.Core.ps1')
+. (Join-Path $PSScriptRoot 'CampusNetwork.Service.ps1')
 $dataDirectory = Join-Path $PSScriptRoot 'data'
 $credentialPath = Join-Path $dataDirectory 'credential.xml'
 $logPath = Join-Path $dataDirectory 'reconnect.log'
-$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-$mutexName = 'Local\CampusReconnectMutex_' + $sid
-$stopName = 'Local\CampusReconnectStop_' + $sid
+$identity = Get-CampusMonitorIdentity $PSScriptRoot
+$mutexName = $identity.MutexName
+$stopName = $identity.StopName
+$script:monitorStatus = [ordered]@{ MonitorState = 'Starting'; AuthState = 'Unknown'; Message = '正在启动监测。'; Suggestion = ''; LastLoginAt = ''; LastError = '' }
+
+function Publish-CampusStatus([string]$Phase, $Snapshot = $null, $RetryState = $null) {
+    $script:monitorStatus.MonitorState = $Phase
+    if ($null -ne $Snapshot) {
+        $script:monitorStatus.AuthState = $Snapshot.State
+        $script:monitorStatus.ReasonCode = $Snapshot.ReasonCode
+        $script:monitorStatus.Message = Format-CampusDiagnostic $Snapshot
+        $script:monitorStatus.Suggestion = $Snapshot.Suggestion
+        $script:monitorStatus.VpnActive = $Snapshot.VpnActive
+        if ($Snapshot.State -eq 'Unknown') { $script:monitorStatus.LastError = Format-CampusDiagnostic $Snapshot }
+    }
+    if ($null -ne $RetryState) {
+        $script:monitorStatus.FailureCount = $RetryState.Failures
+        $script:monitorStatus.NextAttemptUtc = if ($RetryState.NextAttempt -gt [datetime]::MinValue) { $RetryState.NextAttempt.ToUniversalTime().ToString('o') } else { '' }
+    }
+    [void](Write-CampusMonitorStatus -ProjectRoot $PSScriptRoot -Values $script:monitorStatus)
+}
 
 function Write-CampusLog([string]$Message) {
     $line = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + '  ' + $Message
@@ -43,14 +62,10 @@ function Set-CampusCredential {
 }
 
 function Send-CampusStop {
-    try {
-        $event = [Threading.EventWaitHandle]::OpenExisting($stopName)
-        try { [void]$event.Set(); Write-Host '已通知自动重连工具停止。' } finally { $event.Dispose() }
-    } catch [Threading.WaitHandleCannotBeOpenedException] { Write-Host '当前没有正在运行的自动重连工具。' }
-}
-
-function Get-CampusStartupPath {
-    return Join-Path ([Environment]::GetFolderPath('Startup')) 'CampusNetworkReconnect.lnk'
+    Set-CampusUiPreferences -ProjectRoot $PSScriptRoot -MonitorOnLaunch $false
+    Stop-CampusMonitor -ProjectRoot $PSScriptRoot
+    Stop-CampusOwnedLegacyMonitor -ProjectRoot $PSScriptRoot
+    Write-Host '已请求停止监测，并记住暂停状态。'
 }
 
 try {
@@ -70,42 +85,28 @@ try {
             exit 0
         }
         'EnableStartup' {
-            [void](Read-CampusCredential $credentialPath)
-            $shell = New-Object -ComObject WScript.Shell
-            $shortcut = $shell.CreateShortcut((Get-CampusStartupPath))
-            $shortcut.TargetPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-            $shortcut.Arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + (Join-Path $PSScriptRoot 'CampusNetwork.ps1') + '" -Mode Run -NonInteractive'
-            $shortcut.WorkingDirectory = $PSScriptRoot
-            $shortcut.Description = 'Campus network automatic reauthentication'
-            $shortcut.Save()
+            Set-CampusStartup -ProjectRoot $PSScriptRoot -Enabled $true
             Write-Host '已设置当前 Windows 用户登录后启动。请保持本文件夹的位置不变。'
             exit 0
         }
         'DisableStartup' {
-            $shortcutPath = Get-CampusStartupPath
-            if (Test-Path -LiteralPath $shortcutPath) { Remove-Item -LiteralPath $shortcutPath -Force }
+            Set-CampusStartup -ProjectRoot $PSScriptRoot -Enabled $false
             Write-Host '已取消开机启动。'
             exit 0
         }
     }
     $client = New-CampusHttpClient
-    if ($Mode -in @('Check', 'Diagnose')) {
+    if ($Mode -in @('Check', 'Diagnose', 'DiagnoseJson')) {
         try {
-            $snapshot = Get-CampusSnapshot $client
-            Write-Host (Format-CampusDiagnostic $snapshot)
-            if ($Mode -eq 'Diagnose') {
-                Write-Host ('VPN 隧道启用：' + $snapshot.VpnActive)
-                Write-Host '认证请求已禁用系统 HTTP 代理。'
-                if ($snapshot.Network.Known -and $snapshot.Network.HasLink -and $snapshot.Network.HasIpv4) {
-                    $ports = @(Test-CampusTcpPort 80; Test-CampusTcpPort 801)
-                    foreach ($port in $ports) {
-                        Write-Host ('认证地址 10.10.102.50 端口 ' + $port.Port + '：' + $port.Code)
-                    }
-                    if ($ports[0].Reachable -and -not $ports[1].Reachable) {
-                        Write-Host '网页登录端口 80 可达，但认证端口 801 不可达。请核对直连规则是否覆盖所有端口，以及校园网服务或防火墙设置。'
-                    }
-                } else { Write-Host '本地连接或地址尚未就绪，跳过端口探测。' }
+            if ($Mode -eq 'DiagnoseJson') {
+                $resultFullPath = [IO.Path]::GetFullPath($ResultPath)
+                if ([IO.Path]::GetDirectoryName($resultFullPath) -ne [IO.Path]::GetFullPath($dataDirectory) -or
+                    [IO.Path]::GetFileName($resultFullPath) -notmatch '^diagnostic-[a-f0-9]{32}\.json$') { throw '诊断结果位置无效。' }
             }
+            $snapshot = Get-CampusSnapshot $client
+            $diagnosticText = if ($Mode -eq 'Check') { Format-CampusDiagnostic $snapshot } else { Get-CampusDiagnosticText $snapshot }
+            if ($Mode -eq 'DiagnoseJson') { Set-CampusLocalJson $resultFullPath ([ordered]@{ Success = $snapshot.State -ne 'Unknown'; Text = $diagnosticText }) }
+            else { Write-Host $diagnosticText }
             if ($snapshot.State -eq 'Unknown') { exit 2 }
             exit 0
         } finally { $client.Dispose() }
@@ -114,17 +115,27 @@ try {
     $mutex = New-Object Threading.Mutex($false, $mutexName)
     $ownsMutex = $false
     $stop = $null
+    $check = $null
     $watcher = $null
     try {
         try { $ownsMutex = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $ownsMutex = $true }
         if (-not $ownsMutex) { Write-Host '自动重连工具已经在运行。'; exit 0 }
+        $stop = New-Object Threading.EventWaitHandle($false, [Threading.EventResetMode]::ManualReset, $stopName)
+        [void]$stop.Reset()
+        $check = New-Object Threading.EventWaitHandle($false, [Threading.EventResetMode]::AutoReset, $identity.CheckName)
+        if (-not $NonInteractive) { Set-CampusUiPreferences -ProjectRoot $PSScriptRoot -MonitorOnLaunch $true }
+        $previousStatus = Read-CampusLocalJson (Get-CampusPaths $PSScriptRoot).Status
+        if ((Get-CampusField $previousStatus 'OwnerKey') -eq $identity.Key) {
+            $script:monitorStatus.LastLoginAt = Get-CampusField $previousStatus 'LastLoginAt'
+            $script:monitorStatus.LastError = Get-CampusField $previousStatus 'LastError'
+        }
+        Publish-CampusStatus 'Starting'
+        Stop-CampusOwnedLegacyMonitor -ProjectRoot $PSScriptRoot -WaitMilliseconds 15000
         if (-not (Test-Path -LiteralPath $credentialPath)) {
             if ($NonInteractive) { Write-CampusLog '缺少账号配置，请运行首次配置。'; exit 2 }
             Set-CampusCredential
         }
         $credential = Read-CampusCredential $credentialPath
-        $stop = New-Object Threading.EventWaitHandle($false, [Threading.EventResetMode]::ManualReset, $stopName)
-        [void]$stop.Reset()
         $watcher = Start-CampusNetworkWatcher
         $state = New-CampusMonitorState
         $lastStatus = ''
@@ -138,11 +149,20 @@ try {
                 $lastStatus = $statusKey
             }
             $action = Get-CampusAction $state $snapshot.State ([datetime]::UtcNow)
+            $phase = if ($state.NextAttempt -gt [datetime]::UtcNow -and $snapshot.State -eq 'Offline') { 'RetryWaiting' } else { 'Running' }
+            Publish-CampusStatus $phase $snapshot $state
             if ($action -eq 'Login' -and -not $stop.WaitOne(0)) {
                 $credential = Read-CampusCredential $credentialPath
                 Write-CampusLog '检测到认证已失效，立即使用最新保存的账号记录登录。'
+                Publish-CampusStatus 'LoggingIn' $snapshot $state
                 $login = Invoke-CampusLogin $client $snapshot $credential
-                if ($login.Stop) { Write-CampusLog $login.Reason; break }
+                if ($login.Stop) {
+                    Write-CampusLog $login.Reason
+                    $script:monitorStatus.Message = $login.Reason; $script:monitorStatus.LastError = $login.Reason
+                    $script:monitorStatus.Suggestion = '请在账号与设置中检查配置，或打开校园网登录页处理后，再启动监测。'
+                    Publish-CampusStatus 'Error'
+                    break
+                }
                 if ($login.Accepted) {
                     if ($stop.WaitOne(3000)) { break }
                     $verify = Get-CampusSnapshot $client
@@ -150,16 +170,22 @@ try {
                         [void](Get-CampusAction $state 'Online' ([datetime]::UtcNow))
                         $lastStatus = $verify.State + '|' + $verify.ReasonCode + '|' + $verify.Stage + '|' + $verify.HttpStatus + '|' + $verify.VpnActive
                         Write-CampusLog '重新登录成功，认证状态已复核。'
+                        $script:monitorStatus.LastLoginAt = [datetime]::UtcNow.ToString('o')
+                        Publish-CampusStatus 'Running' $verify $state
                     } else {
                         $delay = Set-CampusFailure $state ([datetime]::UtcNow)
                         Write-CampusLog ('登录提交完成，但尚未确认恢复；' + $delay + ' 秒后再试。 ' + (Format-CampusDiagnostic $verify))
+                        $script:monitorStatus.LastError = '登录提交完成，但尚未确认恢复。'
+                        Publish-CampusStatus 'RetryWaiting' $verify $state
                     }
                 } else {
                     $delay = Set-CampusFailure $state ([datetime]::UtcNow)
                     Write-CampusLog ($login.Reason + ' ' + $delay + ' 秒后再试。')
+                    $script:monitorStatus.LastError = $login.Reason
+                    Publish-CampusStatus 'RetryWaiting' $snapshot $state
                 }
             }
-            $wakeReason = Wait-CampusNextCheck $stop $watcher $snapshot.Network.Fingerprint
+            $wakeReason = Wait-CampusNextCheck $stop $watcher $snapshot.Network.Fingerprint -CheckSignal $check
             if ($wakeReason -eq 'Stop') { break }
             if ($wakeReason -in @('NetworkChanged', 'Resumed')) {
                 $freshNetwork = Get-CampusNetworkContext
@@ -173,8 +199,21 @@ try {
             }
         }
         Write-CampusLog '自动重连已停止。'
+    } catch {
+        if ($ownsMutex) {
+            $script:monitorStatus.Message = '监测未能继续，请检查账号记录或重新打开助手。'
+            $script:monitorStatus.LastError = $script:monitorStatus.Message
+            $script:monitorStatus.Suggestion = '请检查本机账号配置，并查看网络诊断结果。'
+            Publish-CampusStatus 'Error'
+        }
+        throw
     } finally {
+        if ($ownsMutex -and $script:monitorStatus.MonitorState -ne 'Error') {
+            $script:monitorStatus.AuthState = 'Unknown'
+            Publish-CampusStatus 'Stopped'
+        }
         Stop-CampusNetworkWatcher $watcher
+        if ($null -ne $check) { $check.Dispose() }
         if ($null -ne $stop) { $stop.Dispose() }
         if ($ownsMutex) { $mutex.ReleaseMutex() }
         $mutex.Dispose()

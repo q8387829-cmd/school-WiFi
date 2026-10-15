@@ -124,6 +124,11 @@ try {
     New-Event -SourceIdentifier $sources.PowerModeChanged -EventArguments @((New-Object Microsoft.Win32.PowerModeChangedEventArgs([Microsoft.Win32.PowerModes]::Suspend))) | Out-Null
     Assert-Diagnostic ((Get-CampusWakeReason $watcher) -eq '') 'Suspend notification is not misreported as resume'
     Assert-Diagnostic ((Wait-CampusNextCheck $stop $watcher $network.Fingerprint 25) -eq 'Poll') 'Normal polling remains available without events'
+    $check = New-Object Threading.AutoResetEvent($true)
+    try {
+        Assert-Diagnostic ((Wait-CampusNextCheck $stop $watcher $network.Fingerprint -CheckSignal $check) -eq 'ManualCheck') 'Tray check request bypasses the polling delay'
+        Assert-Diagnostic ((Wait-CampusNextCheck $stop $watcher $network.Fingerprint 25 -CheckSignal $check) -eq 'Poll') 'Manual check signal resets after one check'
+    } finally { $check.Dispose() }
     [void]$stop.Set()
     Assert-Diagnostic ((Wait-CampusNextCheck $stop $watcher $network.Fingerprint) -eq 'Stop') 'Stop request interrupts the polling wait'
     [void]$stop.Reset()

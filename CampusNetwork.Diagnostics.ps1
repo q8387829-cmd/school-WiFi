@@ -180,12 +180,13 @@ function Stop-CampusNetworkWatcher($Watcher) {
     }
 }
 
-function Wait-CampusNextCheck($Stop, $Watcher, [string]$Fingerprint, [int]$DelayMilliseconds = 5000) {
+function Wait-CampusNextCheck($Stop, $Watcher, [string]$Fingerprint, [int]$DelayMilliseconds = 5000, $CheckSignal = $null) {
     $timer = [Diagnostics.Stopwatch]::StartNew()
     $lastTick = [datetime]::UtcNow
     $lastAdapterCheck = 0
     while ($true) {
         if ($Stop.WaitOne(0)) { return 'Stop' }
+        if ($null -ne $CheckSignal -and $CheckSignal.WaitOne(0)) { return 'ManualCheck' }
         $reason = Get-CampusWakeReason $Watcher
         if ($reason) { return $reason }
         $now = [datetime]::UtcNow

@@ -5,11 +5,17 @@
 ## 使用
 
 1. 下载仓库 ZIP 并解压到固定文件夹，或克隆仓库。
-2. 双击 `首次配置.cmd`，在本机输入账号、运营商和密码。
-3. 双击 `启动自动重连.cmd`，保持窗口运行。
-4. 可选：双击 `设为开机启动.cmd`，以后登录 Windows 后在后台运行。
+2. 双击 `打开校园网助手.cmd`，在设置窗口填写账号、运营商和密码并保存。
+3. 点击“启动监测”，之后可以关闭设置窗口，助手会留在系统托盘中运行。
+4. 可选：在设置窗口启用“开机启动”，以后登录 Windows 后自动打开托盘助手。请保持文件夹的位置不变。
 
-支持 Windows 自带的 Windows PowerShell 5.1，无需额外依赖或管理员权限。完整操作和 VPN 使用说明见 [使用说明.md](使用说明.md)。
+支持 Windows 自带的 Windows PowerShell 5.1，无需额外依赖或管理员权限。旧的 `.cmd` 和命令行入口继续可用。完整操作和 VPN 使用说明见 [使用说明.md](使用说明.md)。
+
+## 托盘和设置
+
+设置窗口集中显示认证状态、故障原因和建议，并提供账号保存、监测启停、立即检查、开机启动、网络诊断和日志查看。双击托盘图标可重新打开窗口；点击窗口右上角关闭只会隐藏窗口。要结束助手并停止监测，请使用托盘右键菜单的“退出”。退出不会删除账号记录或开机启动项。
+
+密码不会回填到设置窗口。账号和运营商不变时，密码留空可保留原密码；更换账号或运营商时必须输入新密码。暂停监测后，关闭再打开助手仍保持暂停，需要主动启动监测。已有的旧版开机启动会迁移到托盘助手，并保留原来的启用状态；原本未启用的用户不会被自动添加开机启动。
 
 ## 行为
 
@@ -26,7 +32,7 @@
 
 ## 网络诊断
 
-双击 `检查连接.cmd` 查看认证结果和处理建议；双击 `诊断网络.cmd` 还会显示 VPN 隧道是否启用，以及认证地址的 TCP 端口 80、801 是否可达。两种检查都不会提交登录密码或修改网络设置。
+启用监测时，在设置窗口中点击“立即检查”可立即复查认证状态，确认未登录后会自动重登。暂停时该按钮不可用，可点击“网络诊断”只读检查认证结果、VPN 隧道状态及认证地址的 TCP 端口 80、801 是否可达。诊断操作不会提交登录密码或修改网络设置。也可继续使用 `检查连接.cmd` 和 `诊断网络.cmd`。
 
 例如 `[RequestTimeout/PortalConfig]` 表示获取认证配置时超时，`[ServerError/SessionList/HTTP 503]` 表示查询会话时收到服务器错误。检测到 VPN 仅作为排查线索，不会直接断定 VPN 拦截。详细分类见 [使用说明.md](使用说明.md)。
 
@@ -37,9 +43,10 @@
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-CampusNetwork.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-CampusDiagnostics.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-CampusService.ps1
 ```
 
-测试使用虚拟凭据、模拟接口响应和模拟事件，不向校园网发送真实登录请求，也不切换 Wi-Fi 或休眠电脑。涵盖立即重连、重试间隔、DPAPI、故障分类、日志脱敏、网络变化和唤醒响应。真实断线后的登录恢复需要在目标校园网中完成配置后验证。
+测试使用虚拟凭据、模拟接口响应和模拟事件，不向校园网发送真实登录请求，也不切换 Wi-Fi 或休眠电脑。涵盖立即重连、重试间隔、DPAPI、故障分类、日志脱敏、网络变化、唤醒响应，以及设置和监测管理。真实断线后的登录恢复需要在目标校园网中完成配置后验证。
 
 ## 文件
 
@@ -48,8 +55,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-CampusDiagnostics
 | `CampusNetwork.ps1` | 配置、监测、停止和开机启动入口 |
 | `CampusNetwork.Core.ps1` | 状态查询、认证请求和重试逻辑 |
 | `CampusNetwork.Diagnostics.ps1` | 本机连接判断、故障分类、端口探测和事件监听 |
+| `CampusNetwork.Tray.ps1` | 系统托盘和统一设置窗口 |
+| `CampusNetwork.TrayView.ps1` | 设置窗口控件和显示 |
+| `CampusNetwork.Service.ps1` | 本机设置、监测管理和开机启动 |
 | `Test-CampusNetwork.ps1` | 无需校园网连接的模拟测试 |
 | `Test-CampusDiagnostics.ps1` | 故障响应和系统事件测试 |
+| `Test-CampusService.ps1` | 设置和监测管理测试 |
 | `*.cmd` | 可双击的操作入口 |
 
 工具不能更改学校认证有效期，也不能代替 Wi-Fi 连接恢复、缴费或验证码操作。
