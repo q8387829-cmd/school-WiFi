@@ -114,6 +114,44 @@ try {
     Assert-Service (-not $view.CredentialAvailable -and ($view | ConvertTo-Json) -notmatch 'fake-secret|broken-record|example.invalid') 'Corrupted credentials produce a safe settings state'
     Save-CampusUiCredential -ProjectRoot $testRoot -Account 'repaired' -Carrier 'cmcc' -Password $nextPassword | Out-Null
 
+    $utcTime = [datetime]::UtcNow
+    Assert-Service ((ConvertTo-CampusUtcTime $utcTime) -eq $utcTime) 'Typed UTC timestamps retain their timezone'
+    Assert-Service ((ConvertTo-CampusUtcTime $utcTime.ToLocalTime()) -eq $utcTime) 'Typed local timestamps normalize to UTC'
+    Assert-Service ((ConvertTo-CampusUtcTime '2026-10-18T12:34:56+08:00') -eq [datetime]::Parse('2026-10-18T04:34:56Z').ToUniversalTime()) 'Explicit offsets normalize to the same UTC instant'
+    Assert-Service ($null -eq (ConvertTo-CampusUtcTime 'not-a-time')) 'Invalid timestamps safely return no time'
+
+    $script:uncachedCredentialReader = (Get-Item Function:\Read-CampusCredential).ScriptBlock
+    $uncachedStartupReader = (Get-Item Function:\Get-CampusStartupInfo).ScriptBlock
+    $script:credentialReads = 0; $script:startupReads = 0
+    function Read-CampusCredential([string]$Path) { $script:credentialReads++; return (& $script:uncachedCredentialReader $Path) }
+    function Get-CampusStartupInfo([string]$ProjectRoot) { $script:startupReads++; return $script:testStartupInfo }
+    try {
+        $cache = @{}
+        $view = Get-CampusAppViewModel $testRoot -Cache $cache
+        1..20 | ForEach-Object { [void](Get-CampusAppViewModel $testRoot -Cache $cache) }
+        Assert-Service ($script:credentialReads -eq 1 -and $script:startupReads -eq 1) 'Unchanged UI refreshes reuse account metadata and startup state without repeated decryption or COM reads'
+        Assert-Service ($cache.LocalState.Value.Account -eq 'repaired' -and ($cache.LocalState.Value | ConvertTo-Json) -notmatch 'Password|Credential"|service-test') 'UI cache contains only display metadata, never passwords or credential objects'
+        Save-CampusUiCredential -ProjectRoot $testRoot -Account 'cache-changed' -Carrier 'telecom' -Password $nextPassword | Out-Null
+        $readsBefore = $script:credentialReads
+        $view = Get-CampusAppViewModel $testRoot -Cache $cache
+        Assert-Service ($view.Account -eq 'cache-changed' -and $view.Carrier -eq 'telecom' -and $script:credentialReads -eq $readsBefore + 1) 'Saving a changed account invalidates the cache on the next refresh'
+        [IO.File]::WriteAllText($paths.Credential, 'broken-record fake-secret')
+        Assert-Service (-not (Get-CampusAppViewModel $testRoot -Cache $cache).CredentialAvailable) 'Corrupting the credential record invalidates cached availability immediately'
+        Remove-Item -LiteralPath $paths.Credential
+        Assert-Service (-not (Get-CampusAppViewModel $testRoot -Cache $cache).CredentialAvailable) 'Deleting the credential record cannot leave cached availability enabled'
+        Save-CampusUiCredential -ProjectRoot $testRoot -Account 'repaired' -Carrier 'cmcc' -Password $nextPassword | Out-Null
+        Assert-Service ((Get-CampusAppViewModel $testRoot -Cache $cache).CredentialAvailable) 'Recreating a valid credential record restores availability immediately'
+        $cache.LocalState.Age = [pscustomobject]@{ ElapsedMilliseconds = 30001 }
+        $readsBefore = $script:credentialReads
+        [void](Get-CampusAppViewModel $testRoot -Cache $cache)
+        Assert-Service ($script:credentialReads -eq $readsBefore + 1) 'Cache lifetime is bounded even when file metadata is unchanged'
+        $otherView = Get-CampusAppViewModel ($testRoot + '-other') -Cache $cache
+        Assert-Service (-not $otherView.CredentialAvailable -and $otherView.Account -eq '') 'One project cannot reuse another project display cache'
+    } finally {
+        Set-Item Function:\Read-CampusCredential -Value $script:uncachedCredentialReader
+        Set-Item Function:\Get-CampusStartupInfo -Value $uncachedStartupReader
+    }
+
     $statusValues = @{
         MonitorState = 'Running'; AuthState = 'Online'; ReasonCode = 'Authenticated'
         Message = 'Test authentication confirmed'; Suggestion = 'Keep monitoring'; VpnActive = $true
@@ -145,8 +183,10 @@ try {
     Set-CampusLocalJson $paths.Status $record
     Assert-Service ((Get-CampusAppViewModel -ProjectRoot $testRoot).AuthState -eq 'Unknown') 'Implausibly future-dated status is rejected'
     $record.UpdatedAt = [datetime]::UtcNow.ToString('o'); $record.OwnerKey = 'other-project'
+    $record.LastError = 'foreign-project-error'
     Set-CampusLocalJson $paths.Status $record
-    Assert-Service ((Get-CampusAppViewModel -ProjectRoot $testRoot).AuthState -eq 'Unknown') 'Another project copy cannot provide this monitor status'
+    $view = Get-CampusAppViewModel -ProjectRoot $testRoot
+    Assert-Service ($view.AuthState -eq 'Unknown' -and $view.LastError -eq '' -and $view.UpdatedAt -eq '') 'Another project copy cannot provide this monitor status, timestamps, or error history'
     $record.OwnerKey = $identity.Key
     Set-CampusLocalJson $paths.Status $record
     $script:testMonitorProcessValid = $false
@@ -272,8 +312,28 @@ try {
     Assert-Service ($diagnosticTask.ResultPath.StartsWith(($paths.Data + '\'), [StringComparison]::OrdinalIgnoreCase) -and $launch.Arguments.Contains(('"' + $diagnosticTask.ResultPath + '"')) -and $launch.Arguments -match '-Mode DiagnoseJson' -and $launch.WindowStyle -eq 'Hidden' -and $launch.PassThru) 'Background diagnosis uses an isolated quoted result file and a hidden process'
     Assert-Service ($null -eq (Get-CampusDiagnosticResult -Task $diagnosticTask) -and -not $script:testProcess.Disposed) 'Pending diagnostic work returns immediately without blocking the settings window'
     Set-CampusLocalJson $diagnosticTask.ResultPath @{ Success = $true; Text = 'Completed mock child result' }
+    Assert-Service ($null -eq (Get-CampusDiagnosticResult -Task $diagnosticTask) -and -not $script:testProcess.Disposed) 'An in-progress diagnostic retains its result and handle until the child exits'
+    $script:testProcess.HasExited = $true
     $result = Get-CampusDiagnosticResult -Task $diagnosticTask
     Assert-Service ($result.Success -and $script:testProcess.Disposed -and -not (Test-Path -LiteralPath $diagnosticTask.ResultPath)) 'Completed background diagnosis releases the process handle and temporary result'
+
+    $racePath = Join-Path $paths.Data 'diagnostic-exit-race.json'
+    $raceProcess = [pscustomobject]@{ Disposed = $false; ResultPath = $racePath }
+    $raceProcess | Add-Member ScriptProperty HasExited {
+        Set-CampusLocalJson $this.ResultPath @{ Success = $true; Text = 'Final result arrived during process check' }
+        return $true
+    }
+    $raceProcess | Add-Member ScriptMethod Dispose { $this.Disposed = $true }
+    $raceTask = [pscustomobject]@{ Process = $raceProcess; ResultPath = $racePath }
+    $result = Get-CampusDiagnosticResult $raceTask
+    Assert-Service ($result.Success -and $result.Text -eq 'Final result arrived during process check' -and $raceProcess.Disposed -and -not (Test-Path -LiteralPath $racePath)) 'A result written as the diagnostic exits is read instead of discarded'
+
+    $script:testProcess.HasExited = $false; $script:testProcess.Killed = $false; $script:testProcess.Disposed = $false
+    $timeoutTask = Start-CampusDiagnostic -ProjectRoot $testRoot
+    $timeoutTask.Timer = [pscustomobject]@{ ElapsedMilliseconds = 60001 }
+    Set-CampusLocalJson $timeoutTask.ResultPath @{ Success = $true; Text = 'Incomplete work' }
+    $result = Get-CampusDiagnosticResult $timeoutTask
+    Assert-Service (-not $result.Success -and $result.Text -match '60' -and $script:testProcess.Killed -and $script:testProcess.Disposed -and -not (Test-Path -LiteralPath $timeoutTask.ResultPath)) 'A hung diagnostic times out, cleans its own child, and never reports incomplete work as success'
 
     $resultPath = Join-Path $paths.Data 'diagnostic-test.json'
     $task = [pscustomobject]@{ Process = $null; ResultPath = $resultPath }

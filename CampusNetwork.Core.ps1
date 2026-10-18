@@ -161,7 +161,9 @@ function Get-CampusSnapshot($Client, $Network = $null) {
             (Get-CampusField $config 'en_md5' 0) -ne 0 -or (Get-CampusField $config 'password_cut' 0) -ne 0) {
             Throw-CampusFault 'UnsupportedProtocol' 'PortalConfig'
         }
-        if ((Get-CampusField $config 'check_online_method' 0) -eq 1) {
+        $onlineMethod = [string](Get-CampusField $config 'check_online_method' -1)
+        if ($onlineMethod -notin @('0', '1')) { Throw-CampusFault 'UnsupportedProtocol' 'PortalConfig' }
+        if ($onlineMethod -eq '1') {
             # This portal checks the RADIUS session list, rather than the Wi-Fi icon.
             $ipNumber = ConvertTo-CampusIpNumber $terminal.Ip
             $reply = Invoke-CampusJsonp $Client 'http://10.10.102.50:801/eportal/portal/online_list' @{
@@ -169,13 +171,14 @@ function Get-CampusSnapshot($Client, $Network = $null) {
                 wlan_user_ip = $ipNumber; curr_user_ip = $ipNumber
             }
             $result = [string](Get-CampusField $reply 'result' '-1')
-            if ($result -eq '1' -and ($null -eq $reply.PSObject.Properties['list'] -or $null -eq $reply.list)) {
+            if ($result -eq '1' -and ($null -eq $reply.PSObject.Properties['list'] -or $reply.list -isnot [array])) {
                 Throw-CampusFault 'InvalidResponse' 'SessionList'
             }
             if ($result -eq '0' -and [string](Get-CampusField $reply 'msg') -match '服务器异常|系统繁忙|查询失败|数据库|超时|服务不可用|internal|timeout|busy|unavailable') {
                 Throw-CampusFault 'ServerError' 'SessionList'
             }
             $sessions = @(Get-CampusField $reply 'list' @())
+            if ($result -eq '0' -and $sessions.Count -gt 0) { Throw-CampusFault 'InvalidResponse' 'SessionList' }
             $owned = @($sessions | Where-Object { (Get-CampusField $_ 'online_ip') -eq $terminal.Ip })
             if ($result -eq '1' -and $owned.Count -gt 0) { $state = 'Online' }
             elseif ($result -eq '0' -or ($result -eq '1' -and $sessions.Count -eq 0)) { $state = 'Offline' }
@@ -215,7 +218,11 @@ function Set-CampusFailure($State, [datetime]$Now) {
     return [int]$delay
 }
 
-function Invoke-CampusLogin($Client, $Snapshot, [pscredential]$Credential) {
+function Invoke-CampusLogin($Client, $Snapshot, [pscredential]$Credential, $Network = $null) {
+    if ((Get-CampusField $Snapshot 'State' 'Unknown') -ne 'Offline') {
+        $diagnostic = New-CampusSnapshot 'Unknown' 'AuthenticationUnconfirmed' (Get-CampusField $Snapshot 'Network' $null) -Stage 'Login'
+        return [pscustomobject]@{ Accepted = $false; Stop = $false; Reason = (Format-CampusDiagnostic $diagnostic) }
+    }
     $config = $Snapshot.Config
     # Support only the observed portal protocol, and reject changes requiring MD5/captcha flows.
     if ((Get-CampusField $config 'login_method' -1) -notin @(1, 9) -or
@@ -230,6 +237,14 @@ function Invoke-CampusLogin($Client, $Snapshot, [pscredential]$Credential) {
     $plainPassword = $null
     $data = $null
     try {
+        # A status request can take several seconds. Recheck the local interface
+        # immediately before using the saved password after a DHCP/VPN change.
+        if ($null -eq $Network) { $Network = Get-CampusNetworkContext }
+        if (-not $Network.Known) { Throw-CampusFault 'LocalInfoUnavailable' 'LocalNetwork' }
+        if (-not $Network.HasLink) { Throw-CampusFault 'NoLocalLink' 'LocalNetwork' }
+        if (-not $Network.HasIpv4) { Throw-CampusFault 'NoIpv4' 'LocalNetwork' }
+        $currentTerminal = Get-CampusTerminal ([pscustomobject]@{ v4ip = $Snapshot.Terminal.Ip }) $Network
+        if ($currentTerminal.Mac -ne $Snapshot.Terminal.Mac) { Throw-CampusFault 'LocalAddressChanged' 'LocalNetwork' }
         $plainPassword = $Credential.GetNetworkCredential().Password
         $data = @{
             login_method = (Get-CampusField $config 'login_method'); user_account = $prefix + $Credential.UserName

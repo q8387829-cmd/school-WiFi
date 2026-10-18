@@ -65,12 +65,18 @@ try { Invoke-CampusJsonp $mock 'http://10.10.102.50:801/eportal/portal/login' @{
 Assert-Campus ($rejected -and $mock.Requests.Count -eq 1) 'Redirect response is rejected without a second request'
 
 $credential = New-Object Management.Automation.PSCredential('testuser@unicom', (ConvertTo-SecureString 'fake &+=?#中文' -AsPlainText -Force))
+$loginAdapter = [pscustomobject]@{
+    Id = 'test-wifi'; IsUp = $true; IsLocal = $true; IsTunnel = $false
+    Ipv4 = @('10.9.8.7'); Gateways = @('10.9.8.1'); Mac = 'AABBCCDDEEFF'
+}
+$loginNetwork = Get-CampusNetworkContext -Adapters @($loginAdapter)
 $snapshot = [pscustomobject]@{
+    State = 'Offline'; Network = $loginNetwork
     Config = [pscustomobject]@{ login_method = 1; en_md5 = 0; password_cut = 0; account_prefix = 0 }
     Terminal = [pscustomobject]@{ Ip = '10.9.8.7'; Mac = 'AABBCCDDEEFF'; Ipv6 = '' }
 }
 $mock = New-MockCampusClient @('campusCallback({"result":1})')
-$login = Invoke-CampusLogin $mock $snapshot $credential
+$login = Invoke-CampusLogin $mock $snapshot $credential -Network $loginNetwork
 Assert-Campus ($login.Accepted -and -not $login.Stop) 'Recognize login response without claiming Internet recovery'
 $requestUri = [uri]$mock.Requests[0]
 $parameters = @{}
@@ -81,15 +87,42 @@ foreach ($part in $requestUri.Query.TrimStart('?').Split('&')) {
 Assert-Campus ($requestUri.Host -eq '10.10.102.50' -and $requestUri.Port -eq 801 -and $requestUri.AbsolutePath -eq '/eportal/portal/login') 'Login uses observed portal endpoint'
 Assert-Campus ($parameters.user_account -eq 'testuser@unicom' -and $parameters.user_password -eq 'fake &+=?#中文' -and $parameters.wlan_user_ip -eq '10.9.8.7') 'Login preserves credentials and current device IP'
 $mock = New-MockCampusClient @('campusCallback({"result":0,"ret_code":1,"msg":"密码错误 fake &+=?#中文"})')
-$login = Invoke-CampusLogin $mock $snapshot $credential
+$login = Invoke-CampusLogin $mock $snapshot $credential -Network $loginNetwork
 Assert-Campus ($login.Stop -and -not $login.Accepted -and $login.Reason -notmatch 'fake') 'Wrong password stops automatic submissions and omits raw server response'
 $mock = New-MockCampusClient @()
-$login = Invoke-CampusLogin $mock $snapshot $credential
+$login = Invoke-CampusLogin $mock $snapshot $credential -Network $loginNetwork
 Assert-Campus (-not $login.Accepted -and -not $login.Stop -and $login.Reason -notmatch 'fake') 'Network errors are recoverable and do not expose request URLs'
 $snapshot.Config.login_method = 99
 $mock = New-MockCampusClient @()
-$login = Invoke-CampusLogin $mock $snapshot $credential
+$login = Invoke-CampusLogin $mock $snapshot $credential -Network $loginNetwork
 Assert-Campus ($login.Stop -and $mock.Requests.Count -eq 0) 'Unknown authentication protocol causes no credential submission'
+
+$snapshot.Config.login_method = 1
+foreach ($authState in @('Unknown', 'Online', '')) {
+    $snapshot.State = $authState
+    $mock = New-MockCampusClient @('campusCallback({"result":1})')
+    $login = Invoke-CampusLogin $mock $snapshot $credential -Network $loginNetwork
+    Assert-Campus (-not $login.Accepted -and -not $login.Stop -and $mock.Requests.Count -eq 0) ('Login entry point refuses an unconfirmed offline state: ' + $authState)
+}
+$snapshot.State = 'Offline'
+foreach ($change in @('Address', 'Mac', 'Disconnected', 'NoIpv4', 'Unavailable')) {
+    $adapter = $loginAdapter.PSObject.Copy()
+    switch ($change) {
+        'Address' { $adapter.Ipv4 = @('10.9.8.8') }
+        'Mac' { $adapter.Mac = '112233445566' }
+        'Disconnected' { $adapter.IsUp = $false }
+        'NoIpv4' { $adapter.Ipv4 = @() }
+    }
+    $changedNetwork = Get-CampusNetworkContext -Adapters @($adapter)
+    if ($change -eq 'Unavailable') { $changedNetwork.Known = $false }
+    $mock = New-MockCampusClient @('campusCallback({"result":1})')
+    $login = Invoke-CampusLogin $mock $snapshot $credential -Network $changedNetwork
+    Assert-Campus (-not $login.Accepted -and -not $login.Stop -and $mock.Requests.Count -eq 0 -and $login.Reason -notmatch 'fake|testuser') ('Network change before login prevents credential submission: ' + $change)
+}
+$vpnAdapter = [pscustomobject]@{ Id = 'vpn'; IsUp = $true; IsLocal = $false; IsTunnel = $true; Ipv4 = @('172.19.0.1'); Gateways = @(); Mac = '' }
+$mock = New-MockCampusClient @('campusCallback({"result":1})')
+$login = Invoke-CampusLogin $mock $snapshot $credential -Network (Get-CampusNetworkContext -Adapters @($loginAdapter, $vpnAdapter))
+Assert-Campus ($login.Accepted -and $mock.Requests.Count -eq 1) 'A VPN change with the same local terminal still permits immediate login'
 
 # Mock network-interface discovery only for deterministic offline response tests.
 function Get-CampusTerminal($CoreStatus) { return [pscustomobject]@{ Ip = '10.9.8.7'; Mac = 'AABBCCDDEEFF'; Ipv6 = '' } }
@@ -107,6 +140,20 @@ $mock = New-MockCampusClient @($coreResponse, $configResponse, 'campusCallback({
 Assert-Campus ((Get-CampusSnapshot $mock $mockNetwork).State -eq 'Unknown') 'Another device session does not justify login submission'
 $mock = New-MockCampusClient @($coreResponse, $configResponse, 'campusCallback({"result":1})')
 Assert-Campus ((Get-CampusSnapshot $mock $mockNetwork).State -eq 'Unknown') 'Missing session list is not treated as an expired session'
+foreach ($listValue in @('null', '""', '{}', '0')) {
+    $mock = New-MockCampusClient @($coreResponse, $configResponse, ('campusCallback({"result":1,"list":' + $listValue + '})'))
+    $invalid = Get-CampusSnapshot $mock $mockNetwork
+    Assert-Campus ($invalid.State -eq 'Unknown' -and $invalid.ReasonCode -eq 'InvalidResponse') ('Malformed session collection cannot cause login: ' + $listValue)
+}
+$mock = New-MockCampusClient @($coreResponse, $configResponse, 'campusCallback({"result":0,"list":[{"online_ip":"10.9.8.7"}]})')
+Assert-Campus ((Get-CampusSnapshot $mock $mockNetwork).State -eq 'Unknown') 'Contradictory offline and online-session responses cannot cause login'
+foreach ($methodField in @('', ',"check_online_method":99', ',"check_online_method":null')) {
+    $mock = New-MockCampusClient @($coreResponse, ('campusCallback({"code":1,"data":{"login_method":1' + $methodField + '}})'))
+    $invalid = Get-CampusSnapshot $mock $mockNetwork
+    Assert-Campus ($invalid.State -eq 'Unknown' -and $invalid.ReasonCode -eq 'UnsupportedProtocol') ('Missing or unsupported status protocol cannot fall back to stale kernel status: ' + $methodField)
+}
+$mock = New-MockCampusClient @($coreResponse, 'campusCallback({"code":1,"data":{"login_method":1,"check_online_method":0}})')
+Assert-Campus ((Get-CampusSnapshot $mock $mockNetwork).State -eq 'Online') 'Explicitly configured kernel status remains supported'
 $mock = New-MockCampusClient @()
 Assert-Campus ((Get-CampusSnapshot $mock $mockNetwork).State -eq 'Unknown') 'Unreachable portal is not treated as an expired session'
 

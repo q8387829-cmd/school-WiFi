@@ -79,6 +79,7 @@ function New-CampusSnapshot([string]$State, [string]$Code, $Network, $Terminal =
     switch ($Code) {
         'Authenticated' { $message = '校园网已登录。'; $suggestion = '保持监测，无需重复登录。' }
         'NotAuthenticated' { $message = '校园网未登录或认证已过期。'; $suggestion = '自动重连程序将立即使用已保存的账号登录；失败重试期间仍按间隔等待。' }
+        'AuthenticationUnconfirmed' { $message = '尚未确认校园网认证已失效，已跳过登录。'; $suggestion = '等待下一次认证检查，确认未登录后才会提交账号密码。' }
         'NoLocalLink' { $message = 'Wi-Fi 或有线网络未连接。'; $suggestion = '先连接校园网 Wi-Fi 或网线；连接恢复后会立即复查。' }
         'NoIpv4' { $message = '网卡已连接，但尚未获得可用的 IPv4 地址。'; $suggestion = '等待地址分配；持续异常时检查 DHCP 设置或重新连接校园网。' }
         'LocalInfoUnavailable' { $message = '无法读取本机网卡信息。'; $suggestion = '检查当前进程权限或安全软件限制，再运行检查连接。' }

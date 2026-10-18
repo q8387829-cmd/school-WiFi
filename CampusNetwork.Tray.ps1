@@ -126,7 +126,7 @@ function Show-CampusWindow([string]$Page = '') {
 
 function Update-CampusTrayModel {
     try {
-        $script:currentModel = Get-CampusAppViewModel -ProjectRoot $PSScriptRoot
+        $script:currentModel = Get-CampusAppViewModel -ProjectRoot $PSScriptRoot -Cache $script:modelCache
         Set-CampusUiModel $script:ui $script:currentModel
         $script:syncPreferences = $true
         try {
@@ -156,7 +156,7 @@ function Update-CampusTrayModel {
 
 function Invoke-CampusMonitorToggle {
     try {
-        $model = Get-CampusAppViewModel -ProjectRoot $PSScriptRoot
+        $model = Get-CampusAppViewModel -ProjectRoot $PSScriptRoot -Cache $script:modelCache
         if ($model.MonitorRunning) {
             Set-CampusUiPreferences -ProjectRoot $PSScriptRoot -MonitorOnLaunch $false
             [void](Stop-CampusMonitor -ProjectRoot $PSScriptRoot)
@@ -267,6 +267,7 @@ $script:iconState = ''
 $script:allowExit = $false
 $script:syncPreferences = $false
 $script:currentModel = $null
+$script:modelCache = @{}
 $script:hideTipShown = $false
 
 try {

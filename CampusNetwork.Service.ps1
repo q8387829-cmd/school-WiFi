@@ -28,6 +28,46 @@ function Read-CampusLocalJson([string]$Path) {
     try { return ([IO.File]::ReadAllText($Path) | ConvertFrom-Json -ErrorAction Stop) } catch { return $null }
 }
 
+function ConvertTo-CampusUtcTime($Value) {
+    # PowerShell 7 may deserialize JSON timestamps as DateTime; casting them to
+    # strings first loses the timezone and makes a fresh status appear stale.
+    if ($Value -is [datetime]) { return $Value.ToUniversalTime() }
+    if ($Value -is [datetimeoffset]) { return $Value.UtcDateTime }
+    $parsed = [datetimeoffset]::MinValue
+    if ([datetimeoffset]::TryParse([string]$Value, [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$parsed)) { return $parsed.UtcDateTime }
+    return $null
+}
+
+function Get-CampusUiLocalState([string]$ProjectRoot = $PSScriptRoot, [hashtable]$Cache = $null) {
+    $paths = Get-CampusPaths $ProjectRoot
+    $stamp = @($paths.Root)
+    foreach ($path in @($paths.Credential, $paths.Startup)) {
+        $file = New-Object IO.FileInfo($path)
+        $stamp += if ($file.Exists) { $file.CreationTimeUtc.Ticks.ToString() + ':' + $file.LastWriteTimeUtc.Ticks + ':' + $file.Length } else { 'missing' }
+    }
+    $signature = $stamp -join '|'
+    if ($null -ne $Cache -and $Cache.ContainsKey('LocalState')) {
+        $entry = $Cache.LocalState
+        if ($entry.Signature -eq $signature -and $entry.Age.ElapsedMilliseconds -lt 30000) { return $entry.Value }
+    }
+    $account = ''; $carrier = 'unicom'; $available = $false; $credential = $null
+    try {
+        $credential = Read-CampusCredential $paths.Credential
+        $parts = Split-CampusAccount $credential.UserName
+        $account = $parts.Account; $carrier = $parts.Carrier; $available = $true
+    } catch { }
+    finally { if ($null -ne $credential) { $credential.Password.Dispose() } }
+    $value = [pscustomobject]@{
+        Account = $account; Carrier = $carrier; CredentialAvailable = $available
+        StartupEnabled = (Get-CampusStartupInfo $ProjectRoot).Enabled
+    }
+    # Cache only display metadata, never a password or PSCredential. File changes
+    # invalidate immediately; the short TTL also handles unchanged timestamps.
+    if ($null -ne $Cache) { $Cache.LocalState = @{ Signature = $signature; Age = [Diagnostics.Stopwatch]::StartNew(); Value = $value } }
+    return $value
+}
+
 function Set-CampusLocalJson([string]$Path, $Value) {
     $directory = [IO.Path]::GetDirectoryName($Path)
     if (-not (Test-Path -LiteralPath $directory)) { [void][IO.Directory]::CreateDirectory($directory) }
@@ -144,10 +184,12 @@ function Write-CampusMonitorStatus([string]$ProjectRoot = $PSScriptRoot, [System
 }
 
 function Test-CampusMonitorProcess([string]$ProjectRoot, [int]$ProcessId) {
+    $process = $null
     try {
         $process = Get-Process -Id $ProcessId -ErrorAction Stop
         return $process.ProcessName -in @('powershell', 'pwsh')
     } catch { return $false }
+    finally { if ($null -ne $process) { $process.Dispose() } }
 }
 
 function Get-CampusStartupArguments([string]$ProjectRoot = $PSScriptRoot, [switch]$Legacy) {
@@ -196,14 +238,16 @@ function Set-CampusStartup([string]$ProjectRoot = $PSScriptRoot, [bool]$Enabled)
     }
 }
 
-function Get-CampusAppViewModel([string]$ProjectRoot = $PSScriptRoot) {
+function Get-CampusAppViewModel([string]$ProjectRoot = $PSScriptRoot, [hashtable]$Cache = $null) {
     $paths = Get-CampusPaths $ProjectRoot; $identity = Get-CampusMonitorIdentity $ProjectRoot
     $running = Test-CampusMonitorRunning $ProjectRoot
     $record = Read-CampusLocalJson $paths.Status
-    $valid = $false; $updated = [datetime]::MinValue; $recordProcessId = 0
-    if ($null -ne $record -and (Get-CampusField $record 'OwnerKey') -eq $identity.Key -and
-        [datetime]::TryParse([string](Get-CampusField $record 'UpdatedAt'), [ref]$updated)) {
-        $age = ([datetime]::UtcNow - $updated.ToUniversalTime()).TotalSeconds
+    if ((Get-CampusField $record 'OwnerKey') -ne $identity.Key) { $record = $null }
+    $valid = $false; $recordProcessId = 0
+    $updated = ConvertTo-CampusUtcTime (Get-CampusField $record 'UpdatedAt')
+    $lastLogin = ConvertTo-CampusUtcTime (Get-CampusField $record 'LastLoginAt')
+    if ($null -ne $updated) {
+        $age = ([datetime]::UtcNow - $updated).TotalSeconds
         $hasProcessId = [int]::TryParse([string](Get-CampusField $record 'ProcessId' 0), [ref]$recordProcessId) -and $recordProcessId -gt 0
         $valid = $age -ge -60 -and $age -le 45 -and $hasProcessId -and (Test-CampusMonitorProcess $ProjectRoot $recordProcessId)
     }
@@ -225,19 +269,14 @@ function Get-CampusAppViewModel([string]$ProjectRoot = $PSScriptRoot) {
         $detail = [string](Get-CampusField $record 'Message')
         $suggestion = [string](Get-CampusField $record 'Suggestion')
     }
-    $account = ''; $carrier = 'unicom'; $credentialAvailable = $false
-    try {
-        $credential = Read-CampusCredential $paths.Credential
-        $parts = Split-CampusAccount $credential.UserName
-        $account = $parts.Account; $carrier = $parts.Carrier; $credentialAvailable = $true
-    } catch { }
-    $startup = Get-CampusStartupInfo $ProjectRoot
+    $localState = Get-CampusUiLocalState $ProjectRoot -Cache $Cache
     return [pscustomobject]@{
         MonitorRunning = $running; AuthState = $auth; MonitorState = $state; StatusText = $status
         DetailText = $detail; Suggestion = $suggestion; VpnActive = $vpn
-        UpdatedAt = [string](Get-CampusField $record 'UpdatedAt'); LastLoginAt = [string](Get-CampusField $record 'LastLoginAt')
-        LastError = [string](Get-CampusField $record 'LastError'); StartupEnabled = $startup.Enabled
-        CredentialAvailable = $credentialAvailable; Account = $account; Carrier = $carrier
+        UpdatedAt = $(if ($null -ne $updated) { $updated.ToString('o') } else { '' })
+        LastLoginAt = $(if ($null -ne $lastLogin) { $lastLogin.ToString('o') } else { '' })
+        LastError = [string](Get-CampusField $record 'LastError'); StartupEnabled = $localState.StartupEnabled
+        CredentialAvailable = $localState.CredentialAvailable; Account = $localState.Account; Carrier = $localState.Carrier
         MonitorOnLaunch = (Get-CampusUiPreferences $ProjectRoot).MonitorOnLaunch
     }
 }
@@ -253,22 +292,33 @@ function Start-CampusDiagnostic([string]$ProjectRoot = $PSScriptRoot) {
     $resultPath = Join-Path $paths.Data ('diagnostic-' + [guid]::NewGuid().ToString('N') + '.json')
     $arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $paths.Main + '" -Mode DiagnoseJson -ResultPath "' + $resultPath + '"'
     $process = Start-Process -FilePath (Get-CampusPowerShellPath) -ArgumentList $arguments -WorkingDirectory $paths.Root -WindowStyle Hidden -PassThru
-    return [pscustomobject]@{ Process = $process; ResultPath = $resultPath }
+    return [pscustomobject]@{ Process = $process; ResultPath = $resultPath; Timer = [Diagnostics.Stopwatch]::StartNew() }
 }
 
 function Get-CampusDiagnosticResult($Task) {
-    if (Test-Path -LiteralPath $Task.ResultPath) {
-        $result = Read-CampusLocalJson $Task.ResultPath
-        if ($null -ne $result -and $null -ne $result.PSObject.Properties['Text']) {
-            Remove-Item -LiteralPath $Task.ResultPath -Force
-            if ($null -ne $Task.Process) { $Task.Process.Dispose() }
-            return [pscustomobject]@{ Success = [bool](Get-CampusField $result 'Success' $false); Text = [string]$result.Text }
+    $timedOut = $false
+    if ($null -ne $Task.Process -and -not $Task.Process.HasExited) {
+        $timer = Get-CampusField $Task 'Timer' $null
+        if ($null -eq $timer -or $timer.ElapsedMilliseconds -lt 60000) { return $null }
+        # Only the diagnostic child started for this task can be terminated.
+        if (-not $Task.Process.HasExited) {
+            $Task.Process.Kill(); [void]$Task.Process.WaitForExit(2000)
+            $timedOut = $true
         }
     }
-    if ($null -ne $Task.Process -and -not $Task.Process.HasExited) { return $null }
-    if (Test-Path -LiteralPath $Task.ResultPath) { Remove-Item -LiteralPath $Task.ResultPath -Force }
-    if ($null -ne $Task.Process) { $Task.Process.Dispose() }
-    return [pscustomobject]@{ Success = $false; Text = '诊断未能完成，请稍后重试。' }
+    try {
+        if ($timedOut) { return [pscustomobject]@{ Success = $false; Text = '诊断超过 60 秒，已结束本次检查。请确认校园网连接后重试。' } }
+        # Read after observing process exit so a final result arriving between
+        # file and process checks cannot be discarded as a missing result.
+        $result = Read-CampusLocalJson $Task.ResultPath
+        if ($null -ne $result -and $null -ne $result.PSObject.Properties['Text']) {
+            return [pscustomobject]@{ Success = [bool](Get-CampusField $result 'Success' $false); Text = [string]$result.Text }
+        }
+        return [pscustomobject]@{ Success = $false; Text = '诊断未能完成，请稍后重试。' }
+    } finally {
+        try { if (Test-Path -LiteralPath $Task.ResultPath) { Remove-Item -LiteralPath $Task.ResultPath -Force } }
+        finally { if ($null -ne $Task.Process) { $Task.Process.Dispose() } }
+    }
 }
 
 function Clear-CampusUiCredential([string]$ProjectRoot = $PSScriptRoot) {
