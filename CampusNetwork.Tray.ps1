@@ -27,8 +27,8 @@ if (-not [string]::IsNullOrWhiteSpace($PreviewPath)) {
         Set-CampusUiModel $previewUi $sample
         $previewUi.AccountTextBox.Text = 'demo_student'
         $previewUi.MonitorOnLaunchCheckBox.Checked = $true
-        $previewUi.LogTextBox.Text = "2026-10-15 10:26:35  校园网已登录，监测继续运行。`r`n2026-10-15 09:41:08  自动登录成功。`r`n2026-10-15 09:41:05  检测到未登录，立即尝试认证。"
-        $previewUi.DiagnosticTextBox.Text = "网络诊断完成`r`n`r`n无线连接：正常`r`n认证地址：10.10.102.50`r`nHTTP 80 端口：可连接`r`n认证 801 端口：可连接`r`nVPN 隧道：已启用`r`n校园网认证：已登录`r`n`r`n建议：当前认证服务可访问，请保持校园网认证地址为直连。"
+        Set-CampusLogPresentation -TextBox $previewUi.LogTextBox -Text "2026-10-15 10:26:35  校园网已登录，监测继续运行。`r`n2026-10-15 09:41:08  自动登录成功。`r`n2026-10-15 09:41:05  检测到未登录，立即尝试认证。"
+        Set-CampusUiDiagnostic -Ui $previewUi -Success $true -Text "网络诊断完成`r`n`r`n无线连接：正常`r`n认证地址：10.10.102.50`r`nHTTP 80 端口：可连接`r`n认证 801 端口：可连接`r`nVPN 隧道：已启用`r`n校园网认证：已登录`r`n`r`n建议：当前认证服务可访问，请保持校园网认证地址为直连。"
         Show-CampusUiPage $previewUi $PreviewPage
         $previewUi.Form.ShowInTaskbar = $false
         $previewUi.Form.Show()
@@ -113,8 +113,9 @@ function New-CampusStateIcon([string]$State) {
 
 function Set-CampusFeedback([string]$Text, [switch]$ErrorState) {
     $script:ui.FeedbackLabel.Text = $Text
-    $script:ui.FeedbackLabel.ForeColor = ConvertTo-CampusColor '#248A3D'
-    if ($ErrorState) { $script:ui.FeedbackLabel.ForeColor = ConvertTo-CampusColor '#C66A00' }
+    $script:ui.FeedbackLabel.ForeColor = ConvertTo-CampusColor '#636369'
+    if ($ErrorState) { $script:ui.FeedbackLabel.ForeColor = ConvertTo-CampusColor '#A05A00' }
+    $script:ui.ToolTips.SetToolTip($script:ui.FeedbackLabel, $Text)
 }
 
 function Show-CampusWindow([string]$Page = '') {
@@ -191,9 +192,12 @@ function Update-CampusLogView {
     try {
         $text = Get-CampusRecentLog -ProjectRoot $PSScriptRoot -Lines 100
         if ([string]::IsNullOrWhiteSpace($text)) { $text = '暂无运行记录。' }
-        $script:ui.LogTextBox.Text = $text
-        $script:ui.LogTextBox.SelectionStart = $script:ui.LogTextBox.TextLength
-        $script:ui.LogTextBox.ScrollToCaret()
+        $hasSelection = $script:ui.LogTextBox.SelectionLength -gt 0
+        Set-CampusLogPresentation -TextBox $script:ui.LogTextBox -Text $text
+        if (-not $hasSelection) {
+            $script:ui.LogTextBox.SelectionStart = $script:ui.LogTextBox.TextLength
+            $script:ui.LogTextBox.ScrollToCaret()
+        }
         Set-CampusFeedback '已刷新最近 100 条日志。'
     } catch {
         Set-CampusFeedback '暂时无法读取日志，请稍后重试。' -ErrorState
@@ -207,9 +211,10 @@ function Start-CampusUiDiagnostic {
         $script:diagnosticTask = Start-CampusDiagnostic -ProjectRoot $PSScriptRoot
         $script:ui.DiagnosisButton.Enabled = $false
         $script:ui.DiagnosisButton.Text = '诊断中…'
-        $script:ui.DiagnosticTextBox.Text = '正在后台检查网络，请稍候。窗口可正常操作。'
+        Set-CampusUiDiagnostic -Ui $script:ui -Phase Busy -Text '正在后台检查网络，请稍候。窗口可正常操作。'
         Set-CampusFeedback '网络诊断正在后台执行。'
     } catch {
+        Set-CampusUiDiagnostic -Ui $script:ui -Text '无法启动网络诊断，请稍后重试。' -Success $false
         Set-CampusFeedback '无法启动网络诊断，请稍后重试。' -ErrorState
     }
 }
@@ -417,7 +422,7 @@ try {
                 try {
                     $result = Get-CampusDiagnosticResult -Task $script:diagnosticTask
                     if ($null -ne $result) {
-                        $script:ui.DiagnosticTextBox.Text = [string]$result.Text
+                        Set-CampusUiDiagnostic -Ui $script:ui -Text ([string]$result.Text) -Success ([bool]$result.Success)
                         if ($result.Success) { Set-CampusFeedback '网络诊断完成。' } else { Set-CampusFeedback '网络诊断未完成，请查看诊断结果。' -ErrorState }
                         $script:diagnosticTask = $null
                         $script:ui.DiagnosisButton.Text = '开始诊断'
@@ -427,6 +432,7 @@ try {
                     Stop-CampusUiDiagnostic
                     $script:ui.DiagnosisButton.Text = '开始诊断'
                     $script:ui.DiagnosisButton.Enabled = $true
+                    Set-CampusUiDiagnostic -Ui $script:ui -Text '无法读取诊断结果，请重新运行诊断。' -Success $false
                     Set-CampusFeedback '无法读取诊断结果，请重新运行诊断。' -ErrorState
                 }
             }

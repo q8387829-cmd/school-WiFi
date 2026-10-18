@@ -405,6 +405,11 @@ namespace CampusNetwork.UI {
                             e.Graphics.DrawLine(pen, 9.5f, 8, 9.5f, 16);
                             e.Graphics.DrawLine(pen, 14.5f, 8, 14.5f, 16);
                             break;
+                        case "info":
+                            e.Graphics.DrawEllipse(pen, 3, 3, 18, 18);
+                            e.Graphics.DrawLine(pen, 12, 11, 12, 17);
+                            e.Graphics.DrawLine(pen, 12, 7, 12, 7.2f);
+                            break;
                         case "shield":
                             using (GraphicsPath shield = new GraphicsPath()) {
                                 shield.AddLines(new PointF[] { new PointF(12,2.5f), new PointF(20,6), new PointF(19,14) });

@@ -15,6 +15,8 @@
 
 设置窗口保留浅色主题和圆角分组，操作按钮与设置复选框采用原有的平面样式，并使用当前主题的蓝色配色，集中呈现连接概览、账号设置、网络诊断及运行日志。
 
+布局参考 Apple 的[布局指南](https://developer.apple.com/design/human-interface-guidelines/layout)和[色彩指南](https://developer.apple.com/design/human-interface-guidelines/color)，统一标题、正文与辅助文字层级、对齐和分组间距。连接状态与常用操作集中在概览卡片，密码保留规则紧邻输入框。蓝色用于操作和选中项，连接结果同时以文字、图标与语义颜色表达。
+
 设置窗口集中显示认证状态、故障原因和建议，并提供账号保存、监测启停、立即检查、开机启动、网络诊断和日志查看。双击托盘图标可重新打开窗口；点击窗口右上角关闭只会隐藏窗口。要结束助手并停止监测，请使用托盘右键菜单的“退出”。退出不会删除账号记录或开机启动项。
 
 密码不会回填到设置窗口。账号和运营商不变时，密码留空可保留原密码；更换账号或运营商时必须输入新密码。暂停监测后，关闭再打开助手仍保持暂停，需要主动启动监测。已有的旧版开机启动会迁移到托盘助手，并保留原来的启用状态；原本未启用的用户不会被自动添加开机启动。
@@ -41,6 +43,8 @@
 
 界面中的单次后台诊断最多运行约 60 秒，超时会结束本次诊断并允许重新检查。诊断进程退出后再读取最终结果，避免退出瞬间漏读；状态时间统一按 UTC 解析，确保不同时区和 PowerShell 日期类型下的状态有效期判断一致。
 
+诊断页按结论、认证与端口/VPN 检查项、处理建议和完整结果展示。端口可达或诊断运行完成不代表账号已经登录；缺失结果显示未检查或未确认。完整结果可选中复制。日志保留原文，用灰色时间戳、深灰正文和深橙色异常提示帮助阅读。
+
 例如 `[RequestTimeout/PortalConfig]` 表示获取认证配置时超时，`[ServerError/SessionList/HTTP 503]` 表示查询会话时收到服务器错误。检测到 VPN 仅作为排查线索，不会直接断定 VPN 拦截。详细分类见 [使用说明.md](使用说明.md)。
 
 ## 验证
@@ -51,6 +55,7 @@
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-CampusNetwork.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-CampusDiagnostics.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-CampusService.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\Test-CampusPresentation.ps1
 ```
 
 测试使用虚拟凭据、模拟接口响应和模拟事件，不向校园网发送真实登录请求，也不切换 Wi-Fi 或休眠电脑。涵盖立即重连、重试间隔、DPAPI、故障分类、日志脱敏、网络变化、唤醒响应，以及设置和监测管理。真实断线后的登录恢复需要在目标校园网中完成配置后验证。
@@ -65,12 +70,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-CampusService.ps1
 | `CampusNetwork.Tray.ps1` | 系统托盘和统一设置窗口 |
 | `CampusNetwork.TrayView.ps1` | 设置窗口控件和显示 |
 | `CampusNetwork.UiControls.ps1` | 圆角分组、状态及导航图标、账号选择等界面控件 |
+| `CampusNetwork.Presentation.ps1` | 诊断摘要与日志显示格式，不访问账号或网络 |
 | `CampusNetwork.Service.ps1` | 本机设置、监测管理和开机启动 |
 | `Test-CampusNetwork.ps1` | 无需校园网连接的模拟测试 |
 | `Test-CampusDiagnostics.ps1` | 故障响应和系统事件测试 |
 | `Test-CampusService.ps1` | 设置和监测管理测试 |
+| `Test-CampusPresentation.ps1` | 诊断结论、异常配色与日志原文保留测试 |
 | `*.cmd` | 可双击的操作入口 |
 
-更新时请下载完整项目并一起更新上述程序文件，包含 `CampusNetwork.UiControls.ps1`；保留本机 `data/` 文件夹即可继续使用已有账号和设置。
+更新时请下载完整项目并一起更新上述程序文件，包含 `CampusNetwork.UiControls.ps1` 和 `CampusNetwork.Presentation.ps1`；保留本机 `data/` 文件夹即可继续使用已有账号和设置。
 
 工具不能更改学校认证有效期，也不能代替 Wi-Fi 连接恢复、缴费或验证码操作。
