@@ -66,10 +66,10 @@ namespace CampusNetwork {
 }
 
 function New-CampusStateIcon([string]$State) {
-    $color = '#34C759'
-    if ($State -eq 'LoggingIn') { $color = '#007AFF' }
-    if ($State -eq 'Error') { $color = '#FF9500' }
-    if ($State -eq 'Stopped') { $color = '#8E8E93' }
+    $color = '#10B981'
+    if ($State -eq 'LoggingIn') { $color = '#38BDF8' }
+    if ($State -eq 'Error') { $color = '#EF4444' }
+    if ($State -eq 'Stopped') { $color = '#64748B' }
     $bitmap = New-Object Drawing.Bitmap(32, 32)
     $graphics = [Drawing.Graphics]::FromImage($bitmap)
     $brush = New-Object Drawing.SolidBrush((ConvertTo-CampusColor $color))
@@ -113,8 +113,8 @@ function New-CampusStateIcon([string]$State) {
 
 function Set-CampusFeedback([string]$Text, [switch]$ErrorState) {
     $script:ui.FeedbackLabel.Text = $Text
-    $script:ui.FeedbackLabel.ForeColor = ConvertTo-CampusColor '#636369'
-    if ($ErrorState) { $script:ui.FeedbackLabel.ForeColor = ConvertTo-CampusColor '#A05A00' }
+    $script:ui.FeedbackLabel.ForeColor = ConvertTo-CampusColor '#94A3B8'
+    if ($ErrorState) { $script:ui.FeedbackLabel.ForeColor = ConvertTo-CampusColor '#F59E0B' }
     $script:ui.ToolTips.SetToolTip($script:ui.FeedbackLabel, $Text)
 }
 

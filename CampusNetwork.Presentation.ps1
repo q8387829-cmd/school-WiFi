@@ -141,7 +141,7 @@ namespace CampusNetwork {
         $TextBox.ReadOnly = $true
         $TextBox.Text = $Text
         $TextBox.SelectAll()
-        $TextBox.SelectionColor = [Drawing.ColorTranslator]::FromHtml('#323238')
+        $TextBox.SelectionColor = [Drawing.ColorTranslator]::FromHtml('#CBD5E1')
         $TextBox.SelectionFont = $TextBox.Font
         [CampusNetwork.LogParagraphLayout]::SetSpacing($TextBox.Handle)
         # Index against RichTextBox.Text: the native editor normalizes CRLF on
@@ -158,11 +158,11 @@ namespace CampusNetwork {
             if ($diagnosticCode.Success -and $diagnosticCode.Groups['code'].Value -notin @('Authenticated', 'NotAuthenticated', 'INFO', 'DEBUG')) { $warning = $true }
             if ($warning -and $body.Length -gt 0) {
                 $TextBox.Select($line.Index + $bodyStart, $body.Length)
-                $TextBox.SelectionColor = [Drawing.ColorTranslator]::FromHtml('#A55300')
+                $TextBox.SelectionColor = [Drawing.ColorTranslator]::FromHtml('#F59E0B')
             }
             if ($timestamp.Success) {
                 $TextBox.Select($line.Index, $timestamp.Length)
-                $TextBox.SelectionColor = [Drawing.ColorTranslator]::FromHtml('#6E6E76')
+                $TextBox.SelectionColor = [Drawing.ColorTranslator]::FromHtml('#94A3B8')
             }
         }
         $selectionStart = [Math]::Min($selectionStart, $TextBox.TextLength)

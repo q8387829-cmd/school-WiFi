@@ -13,9 +13,13 @@
 
 ## 托盘和设置
 
-设置窗口保留浅色主题和圆角分组，操作按钮与设置复选框采用原有的平面样式，并使用当前主题的蓝色配色，集中呈现连接概览、账号设置、网络诊断及运行日志。
+设置窗口采用深石板蓝背景（`#0F172A`）、天蓝色导航与深橙色主按钮，集中呈现连接概览、账号设置、网络诊断及运行日志。平面按钮与原生复选框继续保留。
 
-布局参考 Apple 的[布局指南](https://developer.apple.com/design/human-interface-guidelines/layout)和[色彩指南](https://developer.apple.com/design/human-interface-guidelines/color)，统一标题、正文与辅助文字层级、对齐和分组间距。连接状态与常用操作集中在概览卡片，密码保留规则紧邻输入框。蓝色用于操作和选中项，连接结果同时以文字、图标与语义颜色表达。
+界面遵循 [UI_DESIGN_SPECIFICATION.md](UI_DESIGN_SPECIFICATION.md)：默认内容区域 1080×780，最小窗口 980×720，208 像素侧栏，12 像素圆角卡片和紧凑表单。标题下方有一条天蓝色细线作为页面标识。侧边栏导航使用左侧竖条高亮选中项。连接状态与常用操作集中在概览卡片，密码保留规则紧邻输入框；时间戳和日志使用 Consolas，中文由系统字体回退显示。连接结果同时以文字、图标与语义颜色表达。
+
+诊断结果和运行日志的文本区有独立凹陷背景（`#16202F`）。原生深色滚动条按 Windows 10 1809 和 1903 及以上版本分别选择主题接口；系统不支持、接口不可用或启用高对比度模式时保留系统滚动条，不影响窗口打开。VPN 状态行带有小图标，以区分 VPN 激活和未激活两种状态。主按钮底色 `#C2410C`，确保白字在普通、悬停、按下三个状态下均通过 4.5:1 对比度检查。复选框仍为原生控件，显式绘制 `#0EA5E9` 选中填充和白色勾号，保留空格键与标签点击操作。诊断列表按比例分配行高，避免分数缩放时累计越界。
+
+导航按钮在 Tab 键聚焦后显示天蓝轮廓，鼠标操作时移除额外焦点轮廓；悬停背景与图标区域一致。导航文字使用已缩放的内边距，避免高 DPI 下重复放大。错误状态的图标、轮廓与监测文字统一使用红色，等待重试使用琥珀色。
 
 设置窗口集中显示认证状态、故障原因和建议，并提供账号保存、监测启停、立即检查、开机启动、网络诊断和日志查看。双击托盘图标可重新打开窗口；点击窗口右上角关闭只会隐藏窗口。要结束助手并停止监测，请使用托盘右键菜单的“退出”。退出不会删除账号记录或开机启动项。
 
@@ -43,7 +47,7 @@
 
 界面中的单次后台诊断最多运行约 60 秒，超时会结束本次诊断并允许重新检查。诊断进程退出后再读取最终结果，避免退出瞬间漏读；状态时间统一按 UTC 解析，确保不同时区和 PowerShell 日期类型下的状态有效期判断一致。
 
-诊断页按结论、认证与端口/VPN 检查项、处理建议和完整结果展示。端口可达或诊断运行完成不代表账号已经登录；缺失结果显示未检查或未确认。完整结果可选中复制。日志保留原文，用灰色时间戳、深灰正文和深橙色异常提示帮助阅读。
+诊断页按结论、认证与端口/VPN 检查项、处理建议和完整结果展示。端口可达或诊断运行完成不代表账号已经登录；缺失结果显示未检查或未确认。完整结果可选中复制。日志保留原文，用灰蓝时间戳、浅色正文和琥珀色异常提示帮助阅读。
 
 例如 `[RequestTimeout/PortalConfig]` 表示获取认证配置时超时，`[ServerError/SessionList/HTTP 503]` 表示查询会话时收到服务器错误。检测到 VPN 仅作为排查线索，不会直接断定 VPN 拦截。详细分类见 [使用说明.md](使用说明.md)。
 
@@ -56,9 +60,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-CampusNetwork.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-CampusDiagnostics.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-CampusService.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\Test-CampusPresentation.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\Test-CampusTheme.ps1
 ```
 
 测试使用虚拟凭据、模拟接口响应和模拟事件，不向校园网发送真实登录请求，也不切换 Wi-Fi 或休眠电脑。涵盖立即重连、重试间隔、DPAPI、故障分类、日志脱敏、网络变化、唤醒响应，以及设置和监测管理。真实断线后的登录恢复需要在目标校园网中完成配置后验证。
+
+主题测试检查实际绘制像素、Tab/鼠标焦点切换、复选框操作、错误状态优先级，以及 125%／150%／200% 绘图 DPI 下的导航文字位置。原生主题的版本选择使用模拟 Windows 版本验证；这不替代各版本 Windows 的实机显示验证。
 
 ## 文件
 
@@ -76,8 +83,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\Test-CampusPresen
 | `Test-CampusDiagnostics.ps1` | 故障响应和系统事件测试 |
 | `Test-CampusService.ps1` | 设置和监测管理测试 |
 | `Test-CampusPresentation.ps1` | 诊断结论、异常配色与日志原文保留测试 |
+| `Test-CampusTheme.ps1` | 深色主题对比度、选中项/禁用文字可读性及键盘焦点检查 |
 | `*.cmd` | 可双击的操作入口 |
 
-更新时请下载完整项目并一起更新上述程序文件，包含 `CampusNetwork.UiControls.ps1` 和 `CampusNetwork.Presentation.ps1`；保留本机 `data/` 文件夹即可继续使用已有账号和设置。
+更新时请下载完整项目并一起更新上述程序文件。`CampusNetwork.UiControls.ps1` 和 `CampusNetwork.TrayView.ps1` 必须使用配套版本，勿单独替换；同时更新 `CampusNetwork.Presentation.ps1` 等随包文件。保留本机 `data/` 文件夹即可继续使用已有账号和设置，新界面在重新启动助手进程后加载。
 
 工具不能更改学校认证有效期，也不能代替 Wi-Fi 连接恢复、缴费或验证码操作。

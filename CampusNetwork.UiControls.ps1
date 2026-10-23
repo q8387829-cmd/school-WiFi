@@ -7,6 +7,7 @@ using System;
 using System.ComponentModel;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace CampusNetwork.UI {
@@ -76,13 +77,199 @@ namespace CampusNetwork.UI {
         }
     }
 
+    // Keep real Button/CheckBox controls and their native input/accessibility
+    // contracts; only replace the portions of painting that ignore dark colors.
+    public static class FlatControlDrawing {
+        public static bool KeyboardFocusVisible { get { return KeyboardFocusTracker.Visible; } }
+        public static void PaintCheckBox(CheckBox control, Graphics graphics, bool hovered, bool pressed) {
+            GraphicsState state = graphics.Save();
+            try {
+                DrawingTools.Prepare(graphics);
+                float scale = graphics.DpiX / 96f;
+                float side = 13 * scale;
+                RectangleF box = new RectangleF(3 * scale, (control.Height - side) / 2, side, side);
+                bool selected = control.CheckState != CheckState.Unchecked;
+                Color fill = selected ? control.FlatAppearance.CheckedBackColor : control.BackColor;
+                Color border = selected ? fill : control.FlatAppearance.BorderColor;
+                Color ink = control.ForeColor;
+                if (!control.Enabled) {
+                    fill = DrawingTools.Mix(fill, control.BackColor, 0.55f);
+                    border = DrawingTools.Mix(border, control.BackColor, 0.45f);
+                    ink = DrawingTools.Mix(ink, control.BackColor, 0.4f);
+                } else if (pressed) {
+                    fill = DrawingTools.Mix(fill, Color.Black, 0.2f);
+                } else if (hovered) {
+                    border = Color.FromArgb(125, 211, 252);
+                }
+                using (SolidBrush background = new SolidBrush(control.BackColor)) { graphics.FillRectangle(background, control.ClientRectangle); }
+                using (SolidBrush brush = new SolidBrush(fill)) { graphics.FillRectangle(brush, box); }
+                using (Pen pen = new Pen(border, Math.Max(1, scale))) { graphics.DrawRectangle(pen, box.X, box.Y, box.Width, box.Height); }
+                if (selected) {
+                    using (Pen tick = new Pen(ink, 1.8f * scale)) {
+                        tick.StartCap = LineCap.Round; tick.EndCap = LineCap.Round; tick.LineJoin = LineJoin.Round;
+                        if (control.CheckState == CheckState.Indeterminate) {
+                            graphics.DrawLine(tick, box.X + 3 * scale, box.Y + 6.5f * scale, box.Right - 3 * scale, box.Y + 6.5f * scale);
+                        } else {
+                            graphics.DrawLines(tick, new PointF[] {
+                                new PointF(box.X + 3 * scale, box.Y + 6.5f * scale),
+                                new PointF(box.X + 5.5f * scale, box.Y + 9 * scale),
+                                new PointF(box.X + 10 * scale, box.Y + 4 * scale) });
+                        }
+                    }
+                }
+                if (control.Enabled && control.Focused && KeyboardFocusTracker.Visible) {
+                    box.Inflate(2 * scale, 2 * scale);
+                    using (Pen focus = new Pen(Color.FromArgb(56, 189, 248), Math.Max(1, scale))) { graphics.DrawRectangle(focus, box.X, box.Y, box.Width, box.Height); }
+                }
+            } finally { graphics.Restore(state); }
+        }
+    }
+
+    // The stock Win11 caption is white, which clashes with the dark window.
+    // Ask DWM for a themed caption first; fall back to immersive dark mode.
+    public static class DarkTitleBar {
+        [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(IntPtr window, int attribute, ref int value, int size);
+        private static bool Set(IntPtr window, int attribute, int value) {
+            try { return DwmSetWindowAttribute(window, attribute, ref value, sizeof(int)) == 0; }
+            catch { return false; }
+        }
+        public static bool Apply(IntPtr window, Color caption, Color text, Color border) {
+            if (window == IntPtr.Zero) { return false; }
+            int captionRef = caption.R | (caption.G << 8) | (caption.B << 16);
+            bool themed = Set(window, 35, captionRef);
+            int textRef = text.R | (text.G << 8) | (text.B << 16);
+            Set(window, 36, textRef);
+            int borderRef = border.R | (border.G << 8) | (border.B << 16);
+            Set(window, 34, borderRef);
+            if (!themed) { themed = Set(window, 20, 1) || Set(window, 19, 1); }
+            return themed;
+        }
+    }
+
+    // Content host that paints a barely visible network motif in its own
+    // background. Transparent pages replay it, so the artwork lines up at
+    // any DPI without extra controls in the layout.
+    public class SurfacePanel : Panel {
+        private Color motifColor = Color.FromArgb(24, 30, 41, 59);
+        public Color MotifColor { get { return motifColor; } set { motifColor = value; Invalidate(); } }
+        public SurfacePanel() {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw |
+                ControlStyles.SupportsTransparentBackColor, true);
+        }
+        protected override void OnPaintBackground(PaintEventArgs e) {
+            using (SolidBrush fill = new SolidBrush(BackColor)) { e.Graphics.FillRectangle(fill, ClientRectangle); }
+            if (motifColor.A == 0 || Width < 60 || Height < 60) { return; }
+            DrawingTools.Prepare(e.Graphics);
+            float scale = e.Graphics.DpiX / 96f;
+            using (Pen pen = new Pen(motifColor, Math.Max(1f, 1.2f * scale))) {
+                pen.StartCap = LineCap.Round; pen.EndCap = LineCap.Round;
+                float centerX = Width - 46 * scale;
+                float centerY = Height - 64 * scale;
+                for (int ring = 1; ring <= 3; ring++) {
+                    float radius = (26 + ring * 22) * scale;
+                    e.Graphics.DrawArc(pen, centerX - radius, centerY - radius, radius * 2, radius * 2, 200, 140);
+                }
+            }
+        }
+    }
+
+    // Optional, private Windows theme APIs. Ordinal 135 is a bool API on 1809
+    // and an enum API on 1903+. Resolve the correct signature only on supported
+    // builds; missing exports and older systems retain the system scroll bars.
+    public static class DarkScrollbars {
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct WindowsVersion {
+            public uint Size, Major, Minor, Build, Platform;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string ServicePack;
+        }
+        [DllImport("ntdll.dll", CharSet = CharSet.Unicode)]
+        private static extern int RtlGetVersion(ref WindowsVersion version);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, EntryPoint = "LoadLibraryExW")]
+        private static extern IntPtr LoadThemeLibrary(string name, IntPtr file, uint flags);
+        [DllImport("kernel32.dll", ExactSpelling = true)]
+        private static extern IntPtr GetProcAddress(IntPtr module, IntPtr ordinal);
+        [DllImport("kernel32.dll")]
+        private static extern bool FreeLibrary(IntPtr module);
+        [DllImport("user32.dll")]
+        private static extern bool IsWindow(IntPtr window);
+        [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
+        private static extern int SetWindowTheme(IntPtr window, string subAppName, string subIdList);
+        [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        private delegate bool AllowDarkModeForApp([MarshalAs(UnmanagedType.I1)] bool allow);
+        [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+        private delegate int SetPreferredAppMode(int mode);
+        [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        private delegate bool AllowDarkModeForWindow(IntPtr window, [MarshalAs(UnmanagedType.I1)] bool allow);
+        [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+        private delegate void FlushMenuThemes();
+        private static bool preferred;
+        private static bool ready;
+        private static bool applied;
+        // Successful delegates and their library stay alive for this UI process.
+        private static IntPtr themeModule;
+        private static AllowDarkModeForWindow allowWindow;
+        internal static int GetAppModeApi(Version version) {
+            if (version == null || version.Major != 10 || version.Minor != 0) { return 0; }
+            if (version.Build == 17763) { return 1; }
+            return version.Build >= 18362 ? 2 : 0;
+        }
+        private static bool Prefer() {
+            if (preferred) { return ready; }
+            preferred = true;
+            try {
+                WindowsVersion version = new WindowsVersion();
+                version.Size = (uint)Marshal.SizeOf(typeof(WindowsVersion));
+                if (RtlGetVersion(ref version) != 0) { return false; }
+                int api = GetAppModeApi(new Version((int)version.Major, (int)version.Minor, (int)version.Build));
+                if (api == 0) { return false; }
+                themeModule = LoadThemeLibrary("uxtheme.dll", IntPtr.Zero, 0x00000800); // System32 only
+                if (themeModule == IntPtr.Zero) { return false; }
+                IntPtr app = GetProcAddress(themeModule, new IntPtr(135));
+                IntPtr window = GetProcAddress(themeModule, new IntPtr(133));
+                if (app == IntPtr.Zero || window == IntPtr.Zero) { return false; }
+                allowWindow = (AllowDarkModeForWindow)Marshal.GetDelegateForFunctionPointer(window, typeof(AllowDarkModeForWindow));
+                if (api == 1) { ((AllowDarkModeForApp)Marshal.GetDelegateForFunctionPointer(app, typeof(AllowDarkModeForApp)))(true); }
+                else { ((SetPreferredAppMode)Marshal.GetDelegateForFunctionPointer(app, typeof(SetPreferredAppMode)))(2); }
+                IntPtr flush = GetProcAddress(themeModule, new IntPtr(136));
+                if (flush != IntPtr.Zero) { ((FlushMenuThemes)Marshal.GetDelegateForFunctionPointer(flush, typeof(FlushMenuThemes)))(); }
+                ready = true;
+                return true;
+            } catch { return false; }
+            finally {
+                if (!ready && themeModule != IntPtr.Zero) { FreeLibrary(themeModule); themeModule = IntPtr.Zero; allowWindow = null; }
+            }
+        }
+        public static bool Apply(IntPtr window) {
+            if (window == IntPtr.Zero || SystemInformation.HighContrast) { return false; }
+            try {
+                if (!IsWindow(window) || !Prefer() || !allowWindow(window, true)) { return false; }
+                bool themed = SetWindowTheme(window, "DarkMode_Explorer", null) == 0;
+                if (themed) { applied = true; }
+                return themed;
+            } catch { return false; }
+        }
+        public static bool Applied { get { return applied; } }
+    }
+
     public class RoundedPanel : Panel {
         private int radius = 20;
         private Color borderColor = Color.FromArgb(18, 25, 42, 62);
+        private bool highlightFocusWithin;
+        private Color focusBorderColor = Color.FromArgb(56, 189, 248);
         [DefaultValue(20)]
         public int Radius { get { return radius; } set { radius = Math.Max(0, value); Invalidate(); } }
         public Color BorderColor { get { return borderColor; } set { borderColor = value; Invalidate(); } }
         public Color FillColor { get { return BackColor; } set { BackColor = value; } }
+        [DefaultValue(false)]
+        public bool HighlightFocusWithin {
+            get { return highlightFocusWithin; }
+            set { highlightFocusWithin = value; if (value) { KeyboardFocusTracker.EnsureInstalled(); } Invalidate(); }
+        }
+        public Color FocusBorderColor { get { return focusBorderColor; } set { focusBorderColor = value; Invalidate(); } }
         public RoundedPanel() {
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw |
@@ -90,6 +277,15 @@ namespace CampusNetwork.UI {
             BackColor = Color.White;
             Padding = new Padding(20);
         }
+        protected override void OnControlAdded(ControlEventArgs e) {
+            base.OnControlAdded(e);
+            e.Control.GotFocus += ChildFocusChanged; e.Control.LostFocus += ChildFocusChanged;
+        }
+        protected override void OnControlRemoved(ControlEventArgs e) {
+            e.Control.GotFocus -= ChildFocusChanged; e.Control.LostFocus -= ChildFocusChanged;
+            base.OnControlRemoved(e);
+        }
+        private void ChildFocusChanged(object sender, EventArgs e) { if (highlightFocusWithin) { Invalidate(); } }
         protected override void OnPaintBackground(PaintEventArgs e) {
             // Transparent child controls replay this method using translated graphics.
             // FillRectangle respects that transform; Graphics.Clear does not.
@@ -102,8 +298,9 @@ namespace CampusNetwork.UI {
             if (bounds.Width < 1 || bounds.Height < 1) { return; }
             using (GraphicsPath path = DrawingTools.Rounded(bounds, radius * scale)) {
                 using (SolidBrush fill = new SolidBrush(BackColor)) { e.Graphics.FillPath(fill, path); }
-                if (borderColor.A > 0) {
-                    using (Pen border = new Pen(borderColor, Math.Max(1, scale))) { e.Graphics.DrawPath(border, path); }
+                Color outline = highlightFocusWithin && ContainsFocus && KeyboardFocusTracker.Visible ? focusBorderColor : borderColor;
+                if (outline.A > 0) {
+                    using (Pen border = new Pen(outline, Math.Max(1, scale))) { e.Graphics.DrawPath(border, path); }
                 }
             }
         }
@@ -301,8 +498,8 @@ namespace CampusNetwork.UI {
         protected override void OnDrawItem(DrawItemEventArgs e) {
             if (e.Bounds.Width < 1 || e.Bounds.Height < 1) { return; }
             bool selected = (e.State & DrawItemState.Selected) != 0;
-            Color fill = selected ? Color.FromArgb(232, 241, 255) : BackColor;
-            Color text = Enabled ? ForeColor : Color.FromArgb(170, 170, 176);
+            Color fill = selected ? DrawingTools.Mix(BackColor, accentColor, 0.20f) : BackColor;
+            Color text = Enabled ? ForeColor : DrawingTools.Mix(ForeColor, BackColor, 0.50f);
             using (SolidBrush brush = new SolidBrush(fill)) { e.Graphics.FillRectangle(brush, e.Bounds); }
             string itemText = e.Index >= 0 && e.Index < Items.Count ? GetItemText(Items[e.Index]) : Text;
             Rectangle textBounds = new Rectangle(e.Bounds.Left + 10, e.Bounds.Top, Math.Max(1, e.Bounds.Width - 20), e.Bounds.Height);
@@ -322,7 +519,7 @@ namespace CampusNetwork.UI {
                 Color outline = Focused && KeyboardFocusTracker.Visible && Enabled ? Color.FromArgb(120, accentColor) : borderColor;
                 if (outline.A > 0) { using (Pen border = new Pen(outline, Math.Max(1, scale))) { graphics.DrawPath(border, path); } }
             }
-            Color textColor = Enabled ? ForeColor : Color.FromArgb(170, 170, 176);
+            Color textColor = Enabled ? ForeColor : DrawingTools.Mix(ForeColor, BackColor, 0.50f);
             int left = (int)(4 * scale);
             int arrowWidth = (int)(24 * scale);
             Rectangle textBounds = new Rectangle(left, 0, Math.Max(1, Width - arrowWidth - left), Height);
@@ -372,8 +569,9 @@ namespace CampusNetwork.UI {
             TabStop = false;
         }
         protected override void OnPaintBackground(PaintEventArgs e) {
-            if (BackColor.A == 0) { e.Graphics.Clear(DrawingTools.ParentColor(this)); }
-            else { base.OnPaintBackground(e); }
+            // Replay the parent's painting at this child's location. Its actual
+            // hover/focus surface can differ from the parent's BackColor property.
+            base.OnPaintBackground(e);
         }
         protected override void OnPaint(PaintEventArgs e) {
             DrawingTools.Prepare(e.Graphics);
@@ -419,6 +617,17 @@ namespace CampusNetwork.UI {
                                 e.Graphics.DrawPath(pen, shield);
                             }
                             e.Graphics.DrawLines(pen, new PointF[] { new PointF(8.5f,12), new PointF(11,14.5f), new PointF(15.5f,9.5f) });
+                            break;
+                        case "play":
+                            e.Graphics.DrawPolygon(pen, new PointF[] { new PointF(8.5f,5), new PointF(18.5f,12), new PointF(8.5f,19) });
+                            break;
+                        case "pause":
+                            e.Graphics.DrawLine(pen, 9.5f, 5.5f, 9.5f, 18.5f);
+                            e.Graphics.DrawLine(pen, 14.5f, 5.5f, 14.5f, 18.5f);
+                            break;
+                        case "refresh":
+                            e.Graphics.DrawArc(pen, 3.5f, 3.5f, 17, 17, -55, 300);
+                            e.Graphics.DrawLines(pen, new PointF[] { new PointF(16.2f,2.6f), new PointF(20.2f,4.2f), new PointF(18.4f,8) });
                             break;
                         case "pulse":
                             e.Graphics.DrawLines(pen, new PointF[] { new PointF(2,12), new PointF(6,12), new PointF(9,5), new PointF(13,19), new PointF(16,10), new PointF(18,12), new PointF(22,12) });

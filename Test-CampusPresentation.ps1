@@ -88,14 +88,14 @@ try {
     Assert-Presentation ($logBox.ReadOnly -and $logBox.ShortcutsEnabled) 'log remains readonly with copy shortcuts enabled'
     Assert-Presentation ($logBox.SelectionStart -eq 10 -and $logBox.SelectionLength -eq 8) 'styling preserves a valid existing selection'
     Assert-Presentation ($logBox.Rtf -match '\\sa80(?:\D|$)') 'paragraph spacing adds four points without inserting blank lines'
-    $gray = [Drawing.ColorTranslator]::FromHtml('#6E6E76').ToArgb()
-    $body = [Drawing.ColorTranslator]::FromHtml('#323238').ToArgb()
-    $orange = [Drawing.ColorTranslator]::FromHtml('#A55300').ToArgb()
+    $gray = [Drawing.ColorTranslator]::FromHtml('#94A3B8').ToArgb()
+    $body = [Drawing.ColorTranslator]::FromHtml('#CBD5E1').ToArgb()
+    $orange = [Drawing.ColorTranslator]::FromHtml('#F59E0B').ToArgb()
     Assert-Presentation ((Get-TestLogColor $logBox '2026-10-18 11:03:00') -eq $gray) 'timestamp stays gray on warning lines'
     Assert-Presentation ((Get-TestLogColor $logBox '暂无异常。') -eq $body) 'no abnormalities is not highlighted as an error'
     Assert-Presentation ((Get-TestLogColor $logBox '自动登录成功。') -eq $body) 'successful login remains ordinary body text'
     Assert-Presentation ((Get-TestLogColor $logBox '自动重连已停止。') -eq $body) 'intentional stop remains ordinary body text'
-    Assert-Presentation ((Get-TestLogColor $logBox '校园网认证接口响应超时。') -eq $orange) 'explicit timeout is highlighted in readable dark orange'
+    Assert-Presentation ((Get-TestLogColor $logBox '校园网认证接口响应超时。') -eq $orange) 'explicit timeout is highlighted in readable amber'
     Assert-Presentation ((Get-TestLogColor $logBox '登录失败，60 秒后重试。') -eq $orange) 'explicit failure is highlighted without losing its words'
     Assert-Presentation ((Get-TestLogColor $logBox '[Authenticated]') -eq $body) 'normal authenticated diagnostic code is not an error'
     Assert-Presentation ((Get-TestLogColor $logBox '[NotAuthenticated]') -eq $body) 'routine offline detection is not formatted as a process failure'
