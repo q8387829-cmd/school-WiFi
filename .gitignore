@@ -1,13 +1,27 @@
-# Local account credentials and runtime logs
-/data/
-/.test-credential.xml
+# Personal credentials and runtime state must remain local.
+**/data/
+**/state/
+**/logs/
+**/credential.xml
+**/*credential*.clixml
+.env
+.env.*
+auth.json
+secrets.json
+*.pfx
+*.pem
+*.key
+
+# Development, diagnostics and temporary residue.
 /.publish/
+/release-work/
+/v2-audit/
 *.log
 *.log.old
-
-# Editor and temporary files
-.vscode/
 *.tmp
 *.bak
+*.zip
+*.zip.sha256
+.vscode/
 Thumbs.db
 Desktop.ini

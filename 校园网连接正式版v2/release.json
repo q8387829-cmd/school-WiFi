@@ -1,0 +1,81 @@
+{
+  "name": "校园网连接正式版v2",
+  "version": "2.0.0",
+  "releasedOn": "2026-11-08",
+  "releaseType": "script-ui-distribution-update",
+  "entryPoint": "打开校园网助手.cmd",
+  "appRoot": "app",
+  "integrityManifest": "文件清单.sha256",
+  "requires": {
+    "operatingSystem": "Windows 10/11 x64",
+    "powershell": "Windows PowerShell 5.1 (Desktop)",
+    "dotnetFrameworkMinimum": "4.8",
+    "windowsScriptHost": "wscript.exe, permitted by local policy",
+    "webView2Runtime": "Microsoft Edge WebView2 Evergreen Runtime x64, installed separately"
+  },
+  "independence": {
+    "requiresV1Directory": false,
+    "requiresCompleteDirectory": true,
+    "requiresWritableApplicationDirectory": true,
+    "requiresWritableLocalAppData": true,
+    "includesWebView2BrowserRuntime": false,
+    "requiresDevelopmentToolchain": false,
+    "applicationData": "app/data",
+    "webView2UserData": "app/CampusNetwork-Lens/state",
+    "publishedHostRuntime": "%LOCALAPPDATA%/CampusNetworkLens/runtime/<hash>"
+  },
+  "networkTarget": {
+    "deployment": "school-specific Dr.COM",
+    "authenticationHost": "10.10.102.50",
+    "ports": [80, 801]
+  },
+  "defaults": {
+    "monitorOnLaunchWhenPreferenceMissing": true,
+    "migrateCredentialsAutomatically": false,
+    "configureStartupDuringPackaging": false
+  },
+  "recoveryPolicy": {
+    "windowSeconds": 90,
+    "minimumWindowSpacingSeconds": 120,
+    "maximumFastRetryIntervals": 3,
+    "fastRetrySeconds": [3, 5, 10],
+    "normalBackoffSecondsByCumulativeFailure": [15, 30, 60, 120, 300],
+    "unclassifiedRejectionThreshold": 3,
+    "unclassifiedCooldownSeconds": 300,
+    "unclassifiedCounterResetsOn": ["Online", "CredentialRevisionChanged"],
+    "cooldownExpiryClearsUnclassifiedCounter": false,
+    "explicitRejectionHoldsUntil": ["Online", "CredentialRevisionChanged"],
+    "minimumServerRateLimitSeconds": 60,
+    "respectsLongerRetryAfter": true,
+    "minimumManualCheckSpacingSeconds": 5,
+    "minimumEventAcceleratedAttemptSpacingSeconds": 3
+  },
+  "nativeHost": {
+    "rebuiltForV2": false,
+    "csharpSourceIncluded": false,
+    "provenance": "unchanged v1 binaries; original application file versions are 0.0.0.0 and unsigned",
+    "files": [
+      {
+        "path": "app/CampusNetwork-Lens/CampusNetwork.Lens.exe",
+        "sha256": "89F64E81CE52FB4076718554DF8F5EB4183D2867BDA7AECBFE960AE0F70B4DBD",
+        "sizeBytes": 538624
+      },
+      {
+        "path": "app/CampusNetwork-Lens/CampusNetwork.ProcessQuery.dll",
+        "sha256": "0A800B9C7E499880F819129DF130AA003202AEC4DC4A30998398562471548175",
+        "sizeBytes": 4096
+      }
+    ],
+    "webView2SdkVersion": "1.0.4314.35"
+  },
+  "distributionExclusions": [
+    "app/data/**",
+    "app/CampusNetwork-Lens/state/**",
+    "credentials",
+    "runtime logs",
+    "temporary diagnostics",
+    "startup backups",
+    "build and test residue"
+  ],
+  "validationBoundary": "Static, synthetic and integrity checks do not establish real desktop startup, campus authentication or sleep/resume success."
+}

@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; font-src 'self'; frame-src 'none'; media-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>校园网助手 · 正式版 v2</title>
+  <link rel="stylesheet" href="./vendor/lens/tokens.css">
+  <link rel="stylesheet" href="./vendor/lens/components.css">
+  <link rel="stylesheet" href="./app.css">
+  <script src="./app.js" type="module"></script>
+</head>
+<body>
+<div id="app" class="campus-stage" data-scene="aurora">
+  <div class="workspace">
+    <aside class="sidebar lg-surface" data-glass="dock" aria-label="主导航">
+      <div class="sidebar-top">
+        <a class="brand" href="#overview" aria-label="校园网助手，返回连接页"><img class="brand-mark" src="./assets/app-icon.svg" alt="" width="30" height="30"><span>校园网助手</span></a>
+        <div id="navigation"></div>
+      </div>
+      <div id="backend-indicator" class="connection-indicator" role="status"><span class="status-dot" aria-hidden="true"></span><span>后台暂未连接</span></div>
+    </aside>
+    <main id="main" tabindex="-1">
+      <section id="page-overview" class="page" aria-labelledby="overview-title">
+        <div class="page-heading"><h1 id="overview-title">连接</h1><span class="muted">正式版 v2</span></div>
+        <section id="connection-card" class="glass-card connection-card lg-surface" data-glass="panel">
+          <div class="connection-state"><span class="status-dot" aria-hidden="true"></span><span id="connection-pill">未确认</span></div>
+          <div class="connection-body">
+            <div class="connection-copy"><h2 id="status-title">正在读取连接状态</h2><p id="status-detail">正在连接校园网后台。</p></div>
+            <div class="check-action"><div id="connection-actions" class="action-row"></div></div>
+          </div>
+          <dl class="connection-facts"><div><dt>账号</dt><dd id="current-account">—</dd></div><div><dt>线路</dt><dd id="current-carrier">—</dd></div><div><dt>最近登录</dt><dd id="last-login">—</dd></div></dl>
+          <p id="connection-caption" class="connection-caption">更新于 —</p>
+          <p id="check-policy" class="field-help">监测未开启时只读取认证状态，不提交账号密码。</p>
+          <div class="monitor-line"><div><h3>自动监测与重连</h3><p id="monitor-summary" class="muted">开启后，检测到未登录会自动重新认证。</p></div><div id="monitor-control"></div></div>
+        </section>
+      </section>
+      <section id="page-account" class="page" aria-labelledby="account-title" hidden>
+        <div class="page-heading"><h1 id="account-title">账号与设置</h1></div>
+        <div class="settings-grid">
+          <section class="glass-card account-card lg-surface" data-glass="panel" aria-labelledby="credential-heading">
+            <h2 id="credential-heading">校园网账号</h2>
+            <div class="field"><label for="current-account-input">账号</label><div id="account-input"></div></div>
+            <div class="field"><span class="field-label">运营商</span><div id="carrier-control"></div></div>
+            <div class="field"><label for="account-password-input">密码</label><div id="password-input"></div><span id="password-help" class="field-help">同一账号留空沿用原密码；首次保存或更换账号、线路时请填写。已存密码不会回填。</span></div>
+            <p class="credential-state"><span id="credential-icon" aria-hidden="true"></span><span id="credential-state" role="status">正在读取</span></p>
+            <div id="account-actions" class="action-row"></div>
+            <div class="danger-zone"><div><h3>清除本机账号</h3><p class="field-help">停止监测并删除本机保存的账号和密码。</p></div><div id="account-forget"></div></div>
+          </section>
+          <section class="glass-card startup-card lg-surface" data-glass="panel" aria-labelledby="startup-heading">
+            <h2 id="startup-heading">启动</h2>
+            <div class="setting-line"><div><strong>开机启动助手</strong><span id="startup-copy">登录 Windows 后驻留托盘</span></div><div id="startup-control"></div></div>
+            <div class="setting-line"><div><strong>打开助手时自动监测</strong><span>下次打开时检测连接，未登录则自动重连</span></div><div id="launch-control"></div></div>
+            <p class="tray-help muted">关闭窗口后驻留托盘，双击图标重新打开。</p>
+          </section>
+          <section class="glass-card appearance-card lg-surface" data-glass="panel" aria-labelledby="appearance-heading">
+            <div class="appearance-heading"><h2 id="appearance-heading">UI 风格</h2></div>
+            <div id="appearance-presets"></div>
+            <div class="panel-fill-row lg-surface" data-glass="choice"><label for="panel-fill-switch">面板底色</label><div id="panel-fill-control"></div></div>
+            <div id="appearance-scenes"></div>
+          </section>
+        </div>
+      </section>
+      <section id="page-diagnostics" class="page" aria-labelledby="diagnostics-title" hidden>
+        <div class="page-heading"><h1 id="diagnostics-title">网络诊断</h1><div id="diagnostic-actions" class="action-row"></div></div>
+        <section class="glass-card diagnostic-card lg-surface" data-glass="panel">
+          <h2 id="diagnostic-heading">尚未运行诊断</h2>
+          <p id="diagnostic-copy" class="muted">检查认证与端口状态，不会提交登录。</p>
+          <div id="diagnostic-progress" hidden></div>
+          <ol id="diagnostic-steps" class="diagnostic-steps"></ol>
+          <div id="diagnostic-advice-block" class="diagnostic-advice-block lg-surface" data-glass="note" hidden><h3>建议</h3><p id="diagnostic-advice"></p></div>
+          <details id="diagnostic-details" hidden><summary>查看完整诊断报告</summary><pre id="diagnostic-detail" class="lg-surface" data-glass="note" hidden></pre></details>
+        </section>
+      </section>
+      <section id="page-logs" class="page" aria-labelledby="logs-title" hidden>
+        <div class="page-heading"><h1 id="logs-title">运行日志</h1><div id="log-refresh"></div></div>
+        <section class="glass-card log-card lg-surface" data-glass="panel">
+          <div class="log-toolbar"><div id="log-search"></div><div id="log-filter"></div></div>
+          <div class="log-columns"><span>时间</span><span>事件</span></div>
+          <div id="log-list" class="log-list" role="log" aria-label="校园网运行日志"></div>
+          <p class="log-footnote">仅显示最近 100 条，敏感字段已隐藏。</p>
+        </section>
+      </section>
+    </main>
+  </div>
+  <dialog id="forget-dialog" class="confirm-dialog lg-surface" data-glass="panel" aria-labelledby="forget-title"><h2 id="forget-title">清除本机账号？</h2><p>这会停止自动监测，并删除本机保存的账号和密码。当前网络不会被主动注销。</p><div id="forget-actions" class="action-row"></div></dialog>
+  <div id="toast" class="toast lg-surface" data-glass="notification" role="status" aria-live="polite" hidden></div>
+</div>
+</body>
+</html>

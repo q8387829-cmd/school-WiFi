@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><defs>
+<linearGradient id="tile" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#d3e8e3"/><stop offset=".42" stop-color="#badde8"/><stop offset=".7" stop-color="#b3b6e0"/><stop offset="1" stop-color="#eccbc1"/></linearGradient>
+<linearGradient id="ribbon" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#9db7dc"/><stop offset="1" stop-color="#d3b4d2"/></linearGradient>
+<linearGradient id="lens" x1=".2" y1="0" x2=".8" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".92"/><stop offset="1" stop-color="#f1f4fc" stop-opacity=".6"/></linearGradient>
+<clipPath id="c"><rect x="1" y="1" width="30" height="30" rx="8"/></clipPath>
+</defs>
+<rect x="1" y="1" width="30" height="30" rx="8" fill="url(#tile)"/>
+<path d="M-2 31C6 19 16 27 34 9L34 34-2 34Z" fill="url(#ribbon)" opacity=".5" clip-path="url(#c)"/>
+<rect x="1.5" y="1.5" width="29" height="29" rx="7.5" fill="none" stroke="#fff" stroke-opacity=".7"/>
+<rect x=".5" y=".5" width="31" height="31" rx="8.5" fill="none" stroke="#3c5a6e" stroke-opacity=".28"/>
+<circle cx="16" cy="17.5" r="11.5" fill="url(#lens)"/>
+<circle cx="16" cy="17.5" r="11" fill="none" stroke="#fff" stroke-opacity=".9"/>
+<g fill="none" stroke="#245a42" stroke-width="2" stroke-linecap="round"><path d="M8.58 15.08A10.5 10.5 0 0 1 23.42 15.08"/><path d="M11.05 17.55A7 7 0 0 1 20.95 17.55"/><path d="M13.53 20.03A3.5 3.5 0 0 1 18.47 20.03"/></g>
+<circle cx="16" cy="22.5" r="1.6" fill="#245a42"/></svg>

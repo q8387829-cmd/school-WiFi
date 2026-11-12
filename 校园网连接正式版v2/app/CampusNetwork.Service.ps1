@@ -1,0 +1,468 @@
+﻿. (Join-Path $PSScriptRoot 'CampusNetwork.Core.ps1')
+
+function Get-CampusPaths([string]$ProjectRoot = $PSScriptRoot) {
+    $root = [IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\', '/')
+    $data = Join-Path $root 'data'
+    return [pscustomobject]@{
+        Root = $root; Data = $data; Credential = (Join-Path $data 'credential.xml')
+        Status = (Join-Path $data 'status.json'); Preferences = (Join-Path $data 'ui-settings.json')
+        Log = (Join-Path $data 'reconnect.log'); Main = (Join-Path $root 'CampusNetwork.ps1')
+        Tray = (Join-Path $root 'CampusNetwork.Tray.ps1')
+        Startup = (Join-Path ([Environment]::GetFolderPath('Startup')) 'CampusNetworkReconnect.lnk')
+    }
+}
+
+function Get-CampusMonitorIdentity([string]$ProjectRoot = $PSScriptRoot) {
+    $root = (Get-CampusPaths $ProjectRoot).Root.ToLowerInvariant()
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    try { $key = [BitConverter]::ToString($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($root))).Replace('-', '').Substring(0, 16) }
+    finally { $hasher.Dispose() }
+    $suffix = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value + '_' + $key
+    return [pscustomobject]@{
+        Key = $key; MutexName = 'Local\CampusReconnectMutex_' + $suffix
+        StopName = 'Local\CampusReconnectStop_' + $suffix; CheckName = 'Local\CampusReconnectCheck_' + $suffix
+        ReadyName = 'Local\CampusReconnectReady_' + $suffix
+    }
+}
+
+function Read-CampusLocalJson([string]$Path) {
+    try { return ([IO.File]::ReadAllText($Path) | ConvertFrom-Json -ErrorAction Stop) } catch { return $null }
+}
+
+function ConvertTo-CampusUtcTime($Value) {
+    # PowerShell 7 may deserialize JSON timestamps as DateTime; casting them to
+    # strings first loses the timezone and makes a fresh status appear stale.
+    if ($Value -is [datetime]) { return $Value.ToUniversalTime() }
+    if ($Value -is [datetimeoffset]) { return $Value.UtcDateTime }
+    $parsed = [datetimeoffset]::MinValue
+    if ([datetimeoffset]::TryParse([string]$Value, [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$parsed)) { return $parsed.UtcDateTime }
+    return $null
+}
+
+function Get-CampusUiLocalState([string]$ProjectRoot = $PSScriptRoot, [hashtable]$Cache = $null) {
+    $paths = Get-CampusPaths $ProjectRoot
+    $stamp = @($paths.Root)
+    foreach ($path in @($paths.Credential, $paths.Startup)) {
+        $file = New-Object IO.FileInfo($path)
+        $stamp += if ($file.Exists) { $file.CreationTimeUtc.Ticks.ToString() + ':' + $file.LastWriteTimeUtc.Ticks + ':' + $file.Length } else { 'missing' }
+    }
+    $signature = $stamp -join '|'
+    if ($null -ne $Cache -and $Cache.ContainsKey('LocalState')) {
+        $entry = $Cache.LocalState
+        if ($entry.Signature -eq $signature -and $entry.Age.ElapsedMilliseconds -lt 30000) { return $entry.Value }
+    }
+    $account = ''; $carrier = 'unicom'; $available = $false; $credential = $null
+    try {
+        $credential = Read-CampusCredential $paths.Credential
+        $parts = Split-CampusAccount $credential.UserName
+        $account = $parts.Account; $carrier = $parts.Carrier; $available = $true
+    } catch { }
+    finally { if ($null -ne $credential) { $credential.Password.Dispose() } }
+    $value = [pscustomobject]@{
+        Account = $account; Carrier = $carrier; CredentialAvailable = $available
+        StartupEnabled = (Get-CampusStartupInfo $ProjectRoot).Enabled
+    }
+    # Cache only display metadata, never a password or PSCredential. File changes
+    # invalidate immediately; the short TTL also handles unchanged timestamps.
+    if ($null -ne $Cache) { $Cache.LocalState = @{ Signature = $signature; Age = [Diagnostics.Stopwatch]::StartNew(); Value = $value } }
+    return $value
+}
+
+function Set-CampusLocalJson([string]$Path, $Value) {
+    $directory = [IO.Path]::GetDirectoryName($Path)
+    if (-not (Test-Path -LiteralPath $directory)) { [void][IO.Directory]::CreateDirectory($directory) }
+    $temporary = $Path + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+    try {
+        [IO.File]::WriteAllText($temporary, ($Value | ConvertTo-Json -Depth 5), (New-Object Text.UTF8Encoding($true)))
+        if (Test-Path -LiteralPath $Path) { [IO.File]::Replace($temporary, $Path, [NullString]::Value) }
+        else { [IO.File]::Move($temporary, $Path) }
+    } finally { if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force } }
+}
+
+function Get-CampusUiPreferences([string]$ProjectRoot = $PSScriptRoot) {
+    $settings = Read-CampusLocalJson (Get-CampusPaths $ProjectRoot).Preferences
+    $enabled = Get-CampusField $settings 'MonitorOnLaunch' $true
+    if ($enabled -isnot [bool]) { $enabled = $true }
+    return [pscustomobject]@{ MonitorOnLaunch = $enabled }
+}
+
+function Set-CampusUiPreferences([string]$ProjectRoot = $PSScriptRoot, [bool]$MonitorOnLaunch = $true) {
+    Set-CampusLocalJson (Get-CampusPaths $ProjectRoot).Preferences ([ordered]@{ SchemaVersion = 1; MonitorOnLaunch = $MonitorOnLaunch })
+}
+
+function Split-CampusAccount([string]$Account) {
+    if ($Account -match '^(.+)@(unicom|cmcc|telecom)$') { return [pscustomobject]@{ Account = $Matches[1]; Carrier = $Matches[2].ToLowerInvariant() } }
+    return [pscustomobject]@{ Account = $Account; Carrier = 'campus' }
+}
+
+function Resolve-CampusAccount([string]$Account, [string]$Carrier) {
+    $accountValue = $Account.Trim()
+    if ([string]::IsNullOrWhiteSpace($accountValue) -or $accountValue -notmatch '^[a-zA-Z0-9._@-]+$') { throw '请输入有效的校园网账号。' }
+    if ($Carrier -notin @('campus', 'unicom', 'cmcc', 'telecom')) { throw '请选择有效的运营商。' }
+    $parts = Split-CampusAccount $accountValue
+    if ([string]::IsNullOrWhiteSpace($parts.Account) -or $parts.Account -notmatch '^[a-zA-Z0-9._-]+$') { throw '请输入有效的校园网账号。' }
+    if ($parts.Carrier -ne 'campus') {
+        if ($parts.Carrier -ne $Carrier) { throw '账号后缀与所选运营商不一致。' }
+        return ($parts.Account + '@' + $parts.Carrier)
+    }
+    if ($Carrier -eq 'campus') { return $parts.Account }
+    return $parts.Account + '@' + $Carrier
+}
+
+function Save-CampusUiCredential([string]$ProjectRoot = $PSScriptRoot, [string]$Account, [string]$Carrier, [securestring]$Password) {
+    $paths = Get-CampusPaths $ProjectRoot
+    $fullAccount = Resolve-CampusAccount $Account $Carrier
+    $existing = $null
+    try {
+        if ($null -eq $Password -or $Password.Length -eq 0) {
+            try { $existing = Read-CampusCredential $paths.Credential } catch { throw '首次保存或更换账号、运营商时，请输入密码。' }
+            if (-not [string]::Equals($existing.UserName, $fullAccount, [StringComparison]::Ordinal)) { throw '更换账号或运营商时，请重新输入密码。' }
+            $Password = $existing.Password
+        }
+        if (-not (Test-Path -LiteralPath $paths.Data)) { [void][IO.Directory]::CreateDirectory($paths.Data) }
+        Save-CampusCredential $paths.Credential (New-Object Management.Automation.PSCredential($fullAccount, $Password))
+    } finally { if ($null -ne $existing) { $existing.Password.Dispose() } }
+}
+
+function Test-CampusMonitorRunning([string]$ProjectRoot = $PSScriptRoot) {
+    $mutex = $null; $taken = $false
+    try {
+        $mutex = [Threading.Mutex]::OpenExisting((Get-CampusMonitorIdentity $ProjectRoot).MutexName)
+        try { $taken = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $taken = $true }
+        return -not $taken
+    } catch [Threading.WaitHandleCannotBeOpenedException] { return $false }
+    finally { if ($null -ne $mutex) { if ($taken) { $mutex.ReleaseMutex() }; $mutex.Dispose() } }
+}
+
+function Stop-CampusMonitor([string]$ProjectRoot = $PSScriptRoot) {
+    try {
+        $event = [Threading.EventWaitHandle]::OpenExisting((Get-CampusMonitorIdentity $ProjectRoot).StopName)
+        try { [void]$event.Set() } finally { $event.Dispose() }
+    } catch [Threading.WaitHandleCannotBeOpenedException] { }
+}
+
+function Request-CampusMonitorCheck([string]$ProjectRoot = $PSScriptRoot) {
+    try {
+        $event = [Threading.EventWaitHandle]::OpenExisting((Get-CampusMonitorIdentity $ProjectRoot).CheckName)
+        try { [void]$event.Set() } finally { $event.Dispose() }
+    } catch { throw '监测尚未启动，请先启动监测或使用网络诊断。' }
+}
+
+function Get-CampusPowerShellPath { return Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe' }
+
+function Wait-CampusMonitorReady($Process, [string]$ProjectRoot, [int]$TimeoutMilliseconds = 18000) {
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        # The stop event exists before credential validation and legacy migration.
+        # Only the initialized monitor signals Ready, and an exited child cannot win.
+        if ($Process.HasExited) { return $false }
+        $event = $null
+        try {
+            $event = [Threading.EventWaitHandle]::OpenExisting((Get-CampusMonitorIdentity $ProjectRoot).ReadyName)
+            if ($event.WaitOne(0) -and -not $Process.HasExited) { return $true }
+        } catch [Threading.WaitHandleCannotBeOpenedException] { }
+        finally { if ($null -ne $event) { $event.Dispose() } }
+        Start-Sleep -Milliseconds 50
+    } while ($timer.ElapsedMilliseconds -lt $TimeoutMilliseconds)
+    return $false
+}
+
+function Start-CampusMonitor([string]$ProjectRoot = $PSScriptRoot) {
+    $paths = Get-CampusPaths $ProjectRoot
+    $validatedCredential = Read-CampusCredential $paths.Credential
+    $validatedCredential.Password.Dispose()
+    if (-not (Test-Path -LiteralPath $paths.Main)) { throw '程序文件不完整，请重新下载完整项目。' }
+    if (Test-CampusMonitorRunning $ProjectRoot) { return }
+    $arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $paths.Main + '" -Mode Run -NonInteractive'
+    $process = Start-Process -FilePath (Get-CampusPowerShellPath) -ArgumentList $arguments -WorkingDirectory $paths.Root -WindowStyle Hidden -PassThru
+    try {
+        if (-not (Wait-CampusMonitorReady $process $ProjectRoot)) {
+            if (-not $process.HasExited) { $process.Kill(); [void]$process.WaitForExit(2000) }
+            throw '监测启动失败，请检查程序文件和账号配置后重试。'
+        }
+    } finally { $process.Dispose() }
+}
+
+function Write-CampusMonitorStatus([string]$ProjectRoot = $PSScriptRoot, [System.Collections.IDictionary]$Values) {
+    $record = [ordered]@{ SchemaVersion = 1; OwnerKey = (Get-CampusMonitorIdentity $ProjectRoot).Key; ProcessId = $PID; UpdatedAt = [datetime]::UtcNow.ToString('o') }
+    foreach ($name in @('MonitorState', 'AuthState', 'ReasonCode', 'Message', 'Suggestion', 'VpnActive', 'FailureCount', 'NextAttemptUtc', 'RecoveryUntilUtc', 'LastLoginAt', 'LastError')) {
+        if ($Values.Contains($name)) { $record[$name] = $Values[$name] }
+    }
+    try { Set-CampusLocalJson (Get-CampusPaths $ProjectRoot).Status $record; return $true } catch { return $false }
+}
+
+function Test-CampusMonitorProcessNative([int]$ProcessId) {
+    try {
+        if (-not ('CampusNetwork.MonitorProcessQuery' -as [type])) {
+            $assemblyPath = Join-Path $PSScriptRoot 'CampusNetwork-Lens/CampusNetwork.ProcessQuery.dll'
+            if ([IO.File]::Exists($assemblyPath)) {
+                # Desktop workers may be unable to create CodeDom temporary files.
+                [void][Reflection.Assembly]::Load([IO.File]::ReadAllBytes($assemblyPath))
+            } else {
+                Add-Type -Path (Join-Path $PSScriptRoot 'CampusNetwork-Lens/src/MonitorProcessQuery.cs') -ErrorAction Stop
+            }
+        }
+        return [CampusNetwork.MonitorProcessQuery]::IsLivePowerShell($ProcessId)
+    } catch { return $false }
+}
+
+function Test-CampusMonitorProcess([string]$ProjectRoot, [int]$ProcessId) {
+    $process = $null
+    try {
+        $process = Get-Process -Id $ProcessId -ErrorAction Stop
+        return $process.ProcessName -in @('powershell', 'pwsh')
+    } catch {
+        # Some desktop hosts expose an incomplete process list. Query this PID
+        # directly without trusting the status file or weakening its freshness checks.
+        return Test-CampusMonitorProcessNative $ProcessId
+    }
+    finally { if ($null -ne $process) { $process.Dispose() } }
+}
+
+function Get-CampusScriptHostPath { return Join-Path $env:SystemRoot 'System32\wscript.exe' }
+
+function Get-CampusStartupArguments([string]$ProjectRoot = $PSScriptRoot, [switch]$Legacy, [switch]$PowerShellTray) {
+    $paths = Get-CampusPaths $ProjectRoot
+    if ($Legacy) { return '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $paths.Main + '" -Mode Run -NonInteractive' }
+    if ($PowerShellTray) { return '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -STA -File "' + $paths.Tray + '" -StartHidden' }
+    return '//NoLogo "' + (Join-Path $paths.Root '打开校园网助手.vbs') + '" /background'
+}
+
+function Test-CampusStartupOwnership([string]$ProjectRoot, [string]$TargetPath, [string]$Arguments) {
+    if ([string]::Equals($TargetPath, (Get-CampusScriptHostPath), [StringComparison]::OrdinalIgnoreCase)) {
+        return [string]::Equals($Arguments.Trim(), (Get-CampusStartupArguments $ProjectRoot), [StringComparison]::OrdinalIgnoreCase)
+    }
+    if (-not [string]::Equals($TargetPath, (Get-CampusPowerShellPath), [StringComparison]::OrdinalIgnoreCase)) { return $false }
+    return [string]::Equals($Arguments.Trim(), (Get-CampusStartupArguments $ProjectRoot -PowerShellTray), [StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($Arguments.Trim(), (Get-CampusStartupArguments $ProjectRoot -Legacy), [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-CampusStartupProjectRoot([string]$TargetPath, [string]$Arguments) {
+    # Recognize only an exact command generated by this tool, including its host
+    # and flags. The old directory need not exist after a move or clean install.
+    $match = [regex]::Match($Arguments, '"([^"]+)"')
+    if (-not $match.Success) { return '' }
+    try {
+        $scriptPath = $match.Groups[1].Value
+        if (-not [IO.Path]::IsPathRooted($scriptPath) -or
+            [IO.Path]::GetFileName($scriptPath) -notin @('打开校园网助手.vbs', 'CampusNetwork.Tray.ps1', 'CampusNetwork.ps1')) { return '' }
+        $root = [IO.Path]::GetFullPath([IO.Path]::GetDirectoryName($scriptPath))
+        if (Test-CampusStartupOwnership $root $TargetPath $Arguments) { return $root }
+    } catch { }
+    return ''
+}
+
+function Get-CampusStartupInfo([string]$ProjectRoot = $PSScriptRoot) {
+    $path = (Get-CampusPaths $ProjectRoot).Startup
+    if (-not (Test-Path -LiteralPath $path)) {
+        return [pscustomobject]@{ Exists = $false; Owned = $false; Enabled = $false; Legacy = $false; Recognized = $false; Readable = $true; ProjectRoot = '' }
+    }
+    $shell = $null; $shortcut = $null
+    try {
+        $shell = New-Object -ComObject WScript.Shell; $shortcut = $shell.CreateShortcut($path)
+        $owned = Test-CampusStartupOwnership $ProjectRoot $shortcut.TargetPath $shortcut.Arguments
+        $startupRoot = Get-CampusStartupProjectRoot $shortcut.TargetPath $shortcut.Arguments
+        return [pscustomobject]@{
+            Exists = $true; Owned = $owned; Enabled = $owned
+            Legacy = $owned -and [string]::Equals($shortcut.TargetPath, (Get-CampusPowerShellPath), [StringComparison]::OrdinalIgnoreCase)
+            Recognized = -not [string]::IsNullOrEmpty($startupRoot); Readable = $true; ProjectRoot = $startupRoot
+        }
+    } catch {
+        return [pscustomobject]@{ Exists = $true; Owned = $false; Enabled = $false; Legacy = $false; Recognized = $false; Readable = $false; ProjectRoot = '' }
+    } finally {
+        if ($null -ne $shortcut) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shortcut) }
+        if ($null -ne $shell) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) }
+    }
+}
+
+function Set-CampusStartup([string]$ProjectRoot = $PSScriptRoot, [bool]$Enabled) {
+    $paths = Get-CampusPaths $ProjectRoot; $info = Get-CampusStartupInfo $ProjectRoot
+    # A different copy must never remove the active copy's startup registration.
+    if (-not $Enabled) { if ($info.Owned) { Remove-Item -LiteralPath $paths.Startup -Force }; return }
+    if ($info.Exists -and -not $info.Readable) { throw '无法读取现有开机启动项，请检查启动文件夹的访问权限后重试。' }
+    if ($info.Exists -and -not $info.Recognized) { throw '同名启动项不是本工具创建的，已保留原项。请在 Windows 启动文件夹中检查 CampusNetworkReconnect.lnk。' }
+    $validatedCredential = Read-CampusCredential $paths.Credential
+    $validatedCredential.Password.Dispose()
+    if (-not (Test-Path -LiteralPath $paths.Tray) -or -not (Test-Path -LiteralPath (Join-Path $paths.Root '打开校园网助手.vbs'))) { throw '托盘程序文件缺失，请重新下载完整项目。' }
+    $shell = $null; $shortcut = $null
+    $temporaryPath = Join-Path ([IO.Path]::GetDirectoryName($paths.Startup)) ('CampusNetworkReconnect.' + [guid]::NewGuid().ToString('N') + '.lnk')
+    try {
+        $shell = New-Object -ComObject WScript.Shell; $shortcut = $shell.CreateShortcut($temporaryPath)
+        $shortcut.TargetPath = Get-CampusScriptHostPath
+        $shortcut.Arguments = Get-CampusStartupArguments $ProjectRoot
+        $shortcut.WorkingDirectory = $paths.Root; $shortcut.Description = 'Campus network tray assistant'
+        $shortcut.Save()
+        [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shortcut); $shortcut = $null
+        [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell); $shell = $null
+        # Recheck after validation and shortcut creation in case another copy changed it.
+        $info = Get-CampusStartupInfo $ProjectRoot
+        if ($info.Exists -and -not $info.Readable) { throw '无法读取现有开机启动项，请检查启动文件夹的访问权限后重试。' }
+        if ($info.Exists -and -not $info.Recognized) { throw '同名启动项不是本工具创建的，已保留原项。请在 Windows 启动文件夹中检查 CampusNetworkReconnect.lnk。' }
+        if (-not $info.Exists) { [IO.File]::Move($temporaryPath, $paths.Startup) }
+        else {
+            # Keep the original recoverable for both migrations and current-copy updates.
+            $backupDirectory = Join-Path $paths.Data 'startup-backups'
+            [void][IO.Directory]::CreateDirectory($backupDirectory)
+            $backupPath = Join-Path $backupDirectory ('CampusNetworkReconnect.' + [datetime]::UtcNow.ToString('yyyyMMdd-HHmmss') + '.' + [guid]::NewGuid().ToString('N') + '.lnk')
+            [IO.File]::Copy($paths.Startup, $backupPath, $false)
+            try { [IO.File]::Replace($temporaryPath, $paths.Startup, [NullString]::Value) }
+            catch {
+                # ReplaceFile can fail after removing the destination. Never lose the old link.
+                if (-not [IO.File]::Exists($paths.Startup)) {
+                    try { [IO.File]::Copy($backupPath, $paths.Startup, $false) }
+                    catch { throw '开机启动更新失败，原快捷方式已保存在当前目录的 data/startup-backups，请检查启动文件夹权限后重试。' }
+                }
+                throw
+            }
+        }
+    } finally {
+        if ($null -ne $shortcut) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shortcut) }
+        if ($null -ne $shell) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) }
+        if (Test-Path -LiteralPath $temporaryPath) { Remove-Item -LiteralPath $temporaryPath -Force }
+    }
+}
+
+function Get-CampusAppViewModel([string]$ProjectRoot = $PSScriptRoot, [hashtable]$Cache = $null) {
+    $paths = Get-CampusPaths $ProjectRoot; $identity = Get-CampusMonitorIdentity $ProjectRoot
+    $running = Test-CampusMonitorRunning $ProjectRoot
+    $record = Read-CampusLocalJson $paths.Status
+    if ((Get-CampusField $record 'OwnerKey') -ne $identity.Key) { $record = $null }
+    $valid = $false; $recordProcessId = 0
+    $updated = ConvertTo-CampusUtcTime (Get-CampusField $record 'UpdatedAt')
+    $lastLogin = ConvertTo-CampusUtcTime (Get-CampusField $record 'LastLoginAt')
+    if ($null -ne $updated) {
+        $age = ([datetime]::UtcNow - $updated).TotalSeconds
+        $hasProcessId = [int]::TryParse([string](Get-CampusField $record 'ProcessId' 0), [ref]$recordProcessId) -and $recordProcessId -gt 0
+        $valid = $age -ge -60 -and $age -le 45 -and $hasProcessId -and (Test-CampusMonitorProcess $ProjectRoot $recordProcessId)
+    }
+    $auth = 'Unknown'; $state = if ($running) { 'Starting' } else { 'Stopped' }
+    $status = if ($running) { '正在检查网络' } else { '监测已暂停' }
+    $detail = if ($running) { '正在等待监测结果。' } else { '可启动监测，或使用网络诊断只读检查连接。' }
+    $suggestion = ''; $vpn = $false; $nextAttempt = ''; $recoveryUntil = ''
+    if ($running -and $valid) {
+        $nextAttempt = [string](Get-CampusField $record 'NextAttemptUtc')
+        $recoveryUntil = [string](Get-CampusField $record 'RecoveryUntilUtc')
+        $auth = [string](Get-CampusField $record 'AuthState' 'Unknown')
+        $state = [string](Get-CampusField $record 'MonitorState' 'Running')
+        $detail = [string](Get-CampusField $record 'Message'); $suggestion = [string](Get-CampusField $record 'Suggestion')
+        $vpn = [bool](Get-CampusField $record 'VpnActive' $false)
+        $status = if ($state -eq 'Starting') { '正在检查网络' } elseif ($state -eq 'LoggingIn') { '正在登录' }
+            elseif ($state -eq 'RetryWaiting') { '等待重试' } elseif ($state -eq 'Recovering') { '正在自动恢复连接' } elseif ($state -eq 'Error') { '需要处理' }
+            elseif ($auth -eq 'Online') { '校园网已连接' } elseif ($auth -eq 'Offline') { '校园网未登录' }
+            else { '网络连接异常' }
+    }
+    if (-not $running -and (Get-CampusField $record 'OwnerKey') -eq $identity.Key -and (Get-CampusField $record 'MonitorState') -eq 'Error') {
+        $state = 'Error'; $status = '需要处理'
+        $detail = [string](Get-CampusField $record 'Message')
+        $suggestion = [string](Get-CampusField $record 'Suggestion')
+    }
+    $localState = Get-CampusUiLocalState $ProjectRoot -Cache $Cache
+    return [pscustomobject]@{
+        MonitorRunning = $running; AuthState = $auth; MonitorState = $state; StatusText = $status
+        DetailText = $detail; Suggestion = $suggestion; VpnActive = $vpn
+        NextAttemptUtc = $nextAttempt; RecoveryUntilUtc = $recoveryUntil
+        UpdatedAt = $(if ($null -ne $updated) { $updated.ToString('o') } else { '' })
+        LastLoginAt = $(if ($null -ne $lastLogin) { $lastLogin.ToString('o') } else { '' })
+        LastError = [string](Get-CampusField $record 'LastError'); StartupEnabled = $localState.StartupEnabled
+        CredentialAvailable = $localState.CredentialAvailable; Account = $localState.Account; Carrier = $localState.Carrier
+        MonitorOnLaunch = (Get-CampusUiPreferences $ProjectRoot).MonitorOnLaunch
+    }
+}
+
+function Get-CampusRecentLog([string]$ProjectRoot = $PSScriptRoot, [int]$Lines = 100) {
+    try { return ((Get-Content -LiteralPath (Get-CampusPaths $ProjectRoot).Log -Encoding UTF8 -Tail ([Math]::Min(500, [Math]::Max(1, $Lines))) | ForEach-Object { '{0}' -f $_ }) -join [Environment]::NewLine) }
+    catch { return '暂无运行日志。' }
+}
+
+function Start-CampusDiagnostic([string]$ProjectRoot = $PSScriptRoot) {
+    $paths = Get-CampusPaths $ProjectRoot
+    if (-not (Test-Path -LiteralPath $paths.Data)) { [void][IO.Directory]::CreateDirectory($paths.Data) }
+    $resultPath = Join-Path $paths.Data ('diagnostic-' + [guid]::NewGuid().ToString('N') + '.json')
+    $arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $paths.Main + '" -Mode DiagnoseJson -ResultPath "' + $resultPath + '"'
+    $process = Start-Process -FilePath (Get-CampusPowerShellPath) -ArgumentList $arguments -WorkingDirectory $paths.Root -WindowStyle Hidden -PassThru
+    return [pscustomobject]@{ Process = $process; ResultPath = $resultPath; Timer = [Diagnostics.Stopwatch]::StartNew() }
+}
+
+function Get-CampusDiagnosticResult($Task) {
+    $timedOut = $false
+    if ($null -ne $Task.Process -and -not $Task.Process.HasExited) {
+        $timer = Get-CampusField $Task 'Timer' $null
+        if ($null -eq $timer -or $timer.ElapsedMilliseconds -lt 60000) { return $null }
+        # Only the diagnostic child started for this task can be terminated.
+        if (-not $Task.Process.HasExited) {
+            $Task.Process.Kill(); [void]$Task.Process.WaitForExit(2000)
+            $timedOut = $true
+        }
+    }
+    try {
+        if ($timedOut) { return [pscustomobject]@{ Success = $false; Text = '诊断超过 60 秒，已结束本次检查。请确认校园网连接后重试。' } }
+        # Read after observing process exit so a final result arriving between
+        # file and process checks cannot be discarded as a missing result.
+        $result = Read-CampusLocalJson $Task.ResultPath
+        if ($null -ne $result -and $null -ne $result.PSObject.Properties['Text']) {
+            return [pscustomobject]@{ Success = [bool](Get-CampusField $result 'Success' $false); Text = [string]$result.Text }
+        }
+        return [pscustomobject]@{ Success = $false; Text = '诊断未能完成，请稍后重试。' }
+    } finally {
+        try { if (Test-Path -LiteralPath $Task.ResultPath) { Remove-Item -LiteralPath $Task.ResultPath -Force } }
+        finally { if ($null -ne $Task.Process) { $Task.Process.Dispose() } }
+    }
+}
+
+function Wait-CampusMonitorStopped([string]$ProjectRoot = $PSScriptRoot, [int]$TimeoutMilliseconds = 15000) {
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    while (Test-CampusMonitorRunning $ProjectRoot) {
+        if ($timer.ElapsedMilliseconds -ge $TimeoutMilliseconds) { throw '监测尚未停止，账号记录已保留，请稍后重试。' }
+        Start-Sleep -Milliseconds 100
+    }
+}
+
+function Clear-CampusUiCredential([string]$ProjectRoot = $PSScriptRoot) {
+    Stop-CampusMonitor $ProjectRoot
+    # Every caller, including the tray and CLI, must wait before deleting a record.
+    Wait-CampusMonitorStopped $ProjectRoot
+    Set-CampusUiPreferences $ProjectRoot -MonitorOnLaunch $false
+    $path = (Get-CampusPaths $ProjectRoot).Credential
+    if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+}
+
+function Get-CampusDiagnosticText($Snapshot) {
+    $lines = New-Object 'Collections.Generic.List[string]'
+    $lines.Add((Format-CampusDiagnostic $Snapshot))
+    $lines.Add(('VPN 隧道启用：' + $Snapshot.VpnActive))
+    $lines.Add('认证请求已禁用系统 HTTP 代理。')
+    if ($Snapshot.Network.Known -and $Snapshot.Network.HasLink -and $Snapshot.Network.HasIpv4) {
+        $ports = @(Test-CampusTcpPort 80; Test-CampusTcpPort 801)
+        foreach ($port in $ports) { $lines.Add(('认证地址 10.10.102.50 端口 ' + $port.Port + '：' + $port.Code)) }
+        if ($ports[0].Reachable -and -not $ports[1].Reachable) { $lines.Add('网页登录端口 80 可达，但认证端口 801 不可达。请核对直连规则是否覆盖所有端口，以及校园网服务或防火墙设置。') }
+    } else { $lines.Add('本地连接或地址尚未就绪，跳过端口探测。') }
+    return $lines -join [Environment]::NewLine
+}
+
+function Stop-CampusOwnedLegacyMonitor([string]$ProjectRoot = $PSScriptRoot, [int]$WaitMilliseconds = 0) {
+    $paths = Get-CampusPaths $ProjectRoot
+    try {
+        $pattern = '(?i)-File\s+"' + [regex]::Escape($paths.Main) + '"(?:\s|$)'
+        $legacy = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction Stop | Where-Object {
+            $_.ProcessId -ne $PID -and $_.CommandLine -match $pattern -and $_.CommandLine -match '(?i)-Mode\s+Run(?:\s|$)'
+        })
+        if ($legacy.Count -eq 0) { return }
+        $sidValue = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        $event = [Threading.EventWaitHandle]::OpenExisting('Local\CampusReconnectStop_' + $sidValue)
+        try { [void]$event.Set() } finally { $event.Dispose() }
+        if ($WaitMilliseconds -gt 0) {
+            $mutex = [Threading.Mutex]::OpenExisting('Local\CampusReconnectMutex_' + $sidValue)
+            $taken = $false
+            try {
+                try { $taken = $mutex.WaitOne($WaitMilliseconds) } catch [Threading.AbandonedMutexException] { $taken = $true }
+                if (-not $taken) { throw '旧版监测仍在退出，请稍后重新启动。' }
+            } finally { if ($taken) { $mutex.ReleaseMutex() }; $mutex.Dispose() }
+        }
+    } catch [Threading.WaitHandleCannotBeOpenedException] { }
+}
+
+function Update-CampusStartupIfNeeded([string]$ProjectRoot = $PSScriptRoot) {
+    $info = Get-CampusStartupInfo $ProjectRoot
+    if ($info.Owned -and $info.Legacy) { Set-CampusStartup $ProjectRoot -Enabled $true }
+}
