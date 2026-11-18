@@ -1,11 +1,11 @@
 ﻿# Single-threaded monitor: events and local network changes invalidate snapshots before login.
-function Invoke-CampusMonitorLoop($Stop, $Check, $Watcher, [string]$CredentialPath) {
-    $state = New-CampusMonitorState
+function Invoke-CampusMonitorLoop($Stop, $Check, $Watcher, [string]$CredentialPath, $State = $null) {
+    if ($null -eq $State) { $State = Read-CampusMonitorState $CredentialPath }
     [void](Request-CampusRecovery $state 'Startup' ([datetime]::UtcNow))
     $client = New-CampusHttpClient
     $credential = $null
     $pending = ''
-    $fingerprint = ''
+    $previousNetwork = $null
     $lastStatus = ''
     $verificationPending = $false
     $verifyAfter = [datetime]::MinValue
@@ -15,7 +15,8 @@ function Invoke-CampusMonitorLoop($Stop, $Check, $Watcher, [string]$CredentialPa
             $reason = Get-CampusPendingReason $Stop $Watcher $Check $pending
             $pending = ''
             if ($reason -eq 'Stop') { break }
-            $network = Get-CampusNetworkContext
+            $network = Get-CampusNetworkContext -IncludeRoute
+            $reason = Resolve-CampusNetworkEvent $previousNetwork $network $reason
             $localChanged = Update-CampusRecoveryNetwork $state $network $now
             if ($reason -in @('Resumed', 'ClockGap')) {
                 [void](Request-CampusRecovery $state 'Resumed' $now)
@@ -25,39 +26,40 @@ function Invoke-CampusMonitorLoop($Stop, $Check, $Watcher, [string]$CredentialPa
                 Write-CampusLog '[Check/ManualCheck] 收到立即检查请求；保留账号暂停和服务器冷却限制。'
             }
             if ($localChanged) { Write-CampusLog '[Wake/LocalNetworkChanged] 本地网络地址已变化，立即复查认证。' }
-            if ($reason -in @('Resumed', 'ClockGap', 'NetworkChanged') -or $network.Fingerprint -ne $fingerprint) {
+            if ($reason -in @('Resumed', 'ClockGap', 'NetworkChanged')) {
                 $client.Dispose()
                 $client = New-CampusHttpClient
             }
-            $fingerprint = $network.Fingerprint
+            $previousNetwork = $network
             # A 429 from any endpoint suppresses ALL authentication HTTP until expiry.
             if ($state.RateLimitUntil -gt $now) {
                 $limited = New-CampusSnapshot 'Unknown' 'RateLimited' $network
                 Publish-CampusStatus 'RetryWaiting' $limited $state
-                $pending = Wait-CampusNextCheck $Stop $Watcher $fingerprint -DelayMilliseconds 1000 -CheckSignal $Check
+                $pending = Wait-CampusNextCheck $Stop $Watcher $network.Fingerprint -DelayMilliseconds 1000 -CheckSignal $Check
                 continue
             }
             if ($verificationPending -and $now -lt $verifyAfter) {
                 $remaining = [int][Math]::Max(100, [Math]::Ceiling(($verifyAfter - $now).TotalMilliseconds))
-                $pending = Wait-CampusNextCheck $Stop $Watcher $fingerprint -DelayMilliseconds $remaining -CheckSignal $Check
+                $pending = Wait-CampusNextCheck $Stop $Watcher $network.Fingerprint -DelayMilliseconds $remaining -CheckSignal $Check
                 continue
             }
             $snapshot = Get-CampusSnapshot $client -Network $network -StopSignal $Stop
-            if ($Stop.WaitOne(0) -or $null -eq $snapshot) { break }
+            if ($null -eq $snapshot) { break }
             if ($snapshot.ReasonCode -eq 'RateLimited') {
                 $delay = Set-CampusRateLimit $state ([datetime]::UtcNow) $snapshot.RetryAfterSeconds
+                Sync-CampusRetryProtection $state
                 Write-CampusLog ('[Retry/RateLimited] 所有认证请求暂停 ' + $delay + ' 秒。')
             }
+            if ($Stop.WaitOne(0)) { break }
             # A single request has a 10s timeout. A >15s gap is treated as stale,
             # not an ordinary 30s three-request snapshot or a wall-clock adjustment.
             if ($snapshot.ReasonCode -eq 'ResumeDetected') { $pending = 'ClockGap'; continue }
+            $currentNetwork = Get-CampusNetworkContext -IncludeRoute
             $pending = Get-CampusPendingReason $Stop $Watcher $Check
             if ($pending -eq 'Stop') { break }
-            $currentNetwork = Get-CampusNetworkContext
-            if ($pending -in @('Resumed', 'NetworkChanged', 'ClockGap') -or $currentNetwork.Fingerprint -ne $fingerprint) {
-                if ($pending -ne 'Resumed') { $pending = 'NetworkChanged' }
-                continue
-            }
+            $pending = Resolve-CampusNetworkEvent $network $currentNetwork $pending
+            if ($pending -in @('Resumed', 'NetworkChanged', 'ClockGap')) { continue }
+            $previousNetwork = $currentNetwork
             if ($pending -eq 'ManualCheck') {
                 [void](Request-CampusRecovery $state 'ManualCheck' ([datetime]::UtcNow))
                 Write-CampusLog '[Check/ManualCheck] 收到立即检查请求；当前认证检查已完成。'
@@ -79,6 +81,7 @@ function Invoke-CampusMonitorLoop($Stop, $Check, $Watcher, [string]$CredentialPa
             $previousHold = $state.HoldReason
             $revision = Get-CampusCredentialRevision $CredentialPath
             $action = Get-CampusAction $state $snapshot.State $now $revision
+            Sync-CampusRetryProtection $state
             if ($previousHold -and -not $state.HoldReason) { Write-CampusLog '认证已恢复或账号记录已更新，已解除自动提交暂停。' }
             $statusKey = $snapshot.State + '|' + $snapshot.ReasonCode + '|' + $snapshot.Stage + '|' + $snapshot.HttpStatus + '|' + $snapshot.VpnActive
             if ($statusKey -ne $lastStatus) {
@@ -107,25 +110,29 @@ function Invoke-CampusMonitorLoop($Stop, $Check, $Watcher, [string]$CredentialPa
                     if ($null -ne $credential) { $credential.Password.Dispose() }
                     $credential = $newCredential
                     $action = Get-CampusAction $state $snapshot.State ([datetime]::UtcNow) $beforeRead
+                    if ($beforeRead -ne $revision) { Sync-CampusRetryProtection $state }
                 }
             }
             if ($action -eq 'Login' -and -not $Stop.WaitOne(0)) {
+                $currentNetwork = Get-CampusNetworkContext -IncludeRoute
                 $pending = Get-CampusPendingReason $Stop $Watcher $Check
                 if ($pending -eq 'Stop') { break }
+                $pending = Resolve-CampusNetworkEvent $network $currentNetwork $pending
                 if ($pending -in @('Resumed', 'NetworkChanged', 'ClockGap')) { continue }
-                $currentNetwork = Get-CampusNetworkContext
-                if ($currentNetwork.Fingerprint -ne $fingerprint) { $pending = 'NetworkChanged'; continue }
+                $previousNetwork = $currentNetwork
                 Write-CampusLog '检测到认证已失效，使用最新保存的账号记录登录。'
                 Publish-CampusStatus 'LoggingIn' $snapshot $state
                 $state.LastAttempt = [datetime]::UtcNow
                 $login = Invoke-CampusLogin $client $snapshot $credential -Network $currentNetwork -StopSignal $Stop
-                if ($Stop.WaitOne(0) -or $null -eq $login) { break }
+                if ($null -eq $login) { break }
                 if ($login.Accepted) {
                     $verificationPending = $true
                     $verifyAfter = [datetime]::UtcNow.AddSeconds(3)
                     $state.NextAttempt = $verifyAfter
                 } else {
                     $delay = Set-CampusLoginRejection $state $login ([datetime]::UtcNow)
+                    Sync-CampusRetryProtection $state
+                    if ($Stop.WaitOne(0)) { break }
                     if ($state.HoldReason) {
                         Write-CampusLog $state.HoldReason
                         Publish-CampusStatus 'Error' $snapshot $state
@@ -142,7 +149,7 @@ function Invoke-CampusMonitorLoop($Stop, $Check, $Watcher, [string]$CredentialPa
             if (-not $pending) {
                 $wait = Get-CampusNextDelay $state ([datetime]::UtcNow)
                 if ($verificationPending) { $wait = 3000 }
-                $pending = Wait-CampusNextCheck $Stop $Watcher $fingerprint -DelayMilliseconds $wait -CheckSignal $Check
+                $pending = Wait-CampusNextCheck $Stop $Watcher $previousNetwork.Fingerprint -DelayMilliseconds $wait -CheckSignal $Check
             }
         }
     } finally {

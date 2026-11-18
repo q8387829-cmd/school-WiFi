@@ -149,7 +149,8 @@ try {
         if ((Get-CampusField $previousStatus 'OwnerKey') -eq $identity.Key) {
             $script:monitorStatus.LastLoginAt = Get-CampusField $previousStatus 'LastLoginAt'
             $script:monitorStatus.LastError = Get-CampusField $previousStatus 'LastError'
-        }
+        } else { $previousStatus = $null }
+        $retryState = Read-CampusMonitorState $credentialPath $previousStatus
         Publish-CampusStatus 'Starting'
         Stop-CampusOwnedLegacyMonitor -ProjectRoot $PSScriptRoot -WaitMilliseconds 15000
         if (-not (Test-Path -LiteralPath $credentialPath)) {
@@ -165,7 +166,7 @@ try {
         if (-not $watcher.Sources.ContainsKey('PowerModeChanged')) { Write-CampusLog '电源事件监听不可用，保留单调时间断层与本地网卡检测。' }
         if (-not $stop.WaitOne(0)) { [void]$ready.Set() }
         . (Join-Path $PSScriptRoot 'CampusNetwork.Monitor.ps1')
-        Invoke-CampusMonitorLoop $stop $check $watcher $credentialPath
+        Invoke-CampusMonitorLoop $stop $check $watcher $credentialPath -State $retryState
         Write-CampusLog '自动重连已停止。'
     } catch {
         $monitorFaulted = $true

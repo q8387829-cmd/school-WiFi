@@ -160,6 +160,16 @@ function Get-CampusConfig($Client, $Terminal) {
     return $config
 }
 
+function Test-CampusOfflineMessage($Reply) {
+    foreach ($name in @('msg', 'msga')) {
+        $field = $Reply.PSObject.Properties[$name]
+        if ($null -eq $field -or $null -eq $field.Value) { continue }
+        if ($field.Value -isnot [string] -or $field.Value.Trim() -notin
+            @('', 'ok', 'success', '查询成功', '未登录', '用户未登录', '用户不在线', 'offline', 'not online')) { return $false }
+    }
+    return $true
+}
+
 function Get-CampusSnapshot($Client, $Network = $null, $StopSignal = $null) {
     if ($null -ne $StopSignal -and $StopSignal.WaitOne(0)) { return $null }
     if ($null -eq $Network) { $Network = Get-CampusNetworkContext }
@@ -187,23 +197,31 @@ function Get-CampusSnapshot($Client, $Network = $null, $StopSignal = $null) {
                 wlan_user_ip = $ipNumber; curr_user_ip = $ipNumber
             }
             $result = [string](Get-CampusField $reply 'result' '-1')
-            if ($result -eq '1' -and ($null -eq $reply.PSObject.Properties['list'] -or $reply.list -isnot [array])) {
-                Throw-CampusFault 'InvalidResponse' 'SessionList'
-            }
-            if ($result -eq '0' -and [string](Get-CampusField $reply 'msg') -match '服务器异常|系统繁忙|查询失败|数据库|超时|服务不可用|internal|timeout|busy|unavailable') {
+            if ($result -eq '0' -and [string](Get-CampusField $reply 'msg') -match '维护|服务器异常|系统繁忙|查询失败|数据库|超时|服务不可用|maintenance|internal|timeout|busy|unavailable') {
                 Throw-CampusFault 'ServerError' 'SessionList'
             }
-            $sessions = @(Get-CampusField $reply 'list' @())
-            if ($result -eq '0' -and $sessions.Count -gt 0) { Throw-CampusFault 'InvalidResponse' 'SessionList' }
-            $owned = @($sessions | Where-Object { (Get-CampusField $_ 'online_ip') -eq $terminal.Ip })
-            if ($result -eq '1' -and $owned.Count -gt 0) { $state = 'Online' }
-            elseif ($result -eq '0' -or ($result -eq '1' -and $sessions.Count -eq 0)) { $state = 'Offline' }
-            elseif ($result -eq '1' -and $sessions.Count -gt 0) { Throw-CampusFault 'SessionMismatch' 'SessionList' }
-            else { Throw-CampusFault 'InvalidResponse' 'SessionList' }
+            # Only a successful, explicitly empty session list proves absence.
+            if ($result -ne '1' -or $reply.result -is [array] -or
+                $null -eq $reply.PSObject.Properties['list'] -or $reply.list -isnot [array]) {
+                Throw-CampusFault 'InvalidResponse' 'SessionList'
+            }
+            if ($reply.list.Length -eq 0) {
+                $countConflicts = $null -ne $reply.PSObject.Properties['total'] -and
+                    ($reply.total -is [array] -or [string]$reply.total -ne '0')
+                if ($countConflicts -or -not (Test-CampusOfflineMessage $reply)) {
+                    Throw-CampusFault 'InvalidResponse' 'SessionList'
+                }
+                $state = 'Offline'
+            } elseif (@($reply.list | Where-Object { (Get-CampusField $_ 'online_ip') -eq $terminal.Ip }).Count -gt 0) {
+                $state = 'Online'
+            } else { Throw-CampusFault 'SessionMismatch' 'SessionList' }
         } else {
             $result = [string](Get-CampusField $core 'result' '-1')
+            if ($null -eq $core.PSObject.Properties['result'] -or $core.result -is [array]) {
+                Throw-CampusFault 'InvalidResponse' 'KernelStatus'
+            }
             if ($result -eq '1') { $state = 'Online' }
-            elseif ($result -eq '0') { $state = 'Offline' }
+            elseif ($result -eq '0' -and (Test-CampusOfflineMessage $core)) { $state = 'Offline' }
             else { Throw-CampusFault 'InvalidResponse' 'KernelStatus' }
         }
         $code = if ($state -eq 'Online') { 'Authenticated' } else { 'NotAuthenticated' }

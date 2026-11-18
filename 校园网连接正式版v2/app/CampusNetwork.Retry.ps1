@@ -6,6 +6,7 @@ function New-CampusMonitorState {
         RecoveryUntil = [datetime]::MinValue; RecoveryAvailableAfter = [datetime]::MinValue; FastRetries = 0
         RateLimitUntil = [datetime]::MinValue; SafetyUntil = [datetime]::MinValue
         LocalFingerprint = $null; LastManualCheck = [datetime]::MinValue
+        ProtectionPath = ''; SavedProtection = ''
     }
 }
 

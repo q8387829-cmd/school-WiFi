@@ -56,7 +56,19 @@ function Get-CampusAdapters {
     }
 }
 
-function Get-CampusNetworkContext([object[]]$Adapters) {
+function Get-CampusPortalRouteFingerprint {
+    try {
+        # Windows returns the selected source address followed by the selected route.
+        $source, $route = @(Find-NetRoute -RemoteIPAddress '10.10.102.50' -ErrorAction Stop)
+        if ($source.IPAddress -and $route.NextHop -and $route.InterfaceIndex -gt 0 -and
+            $source.InterfaceIndex -eq $route.InterfaceIndex) {
+            return ('{0}|{1}|{2}' -f $route.InterfaceIndex, $source.IPAddress, $route.NextHop)
+        }
+    } catch { } # Without route evidence, an adapter change still forces a fresh check.
+    return ''
+}
+
+function Get-CampusNetworkContext([object[]]$Adapters, [switch]$IncludeRoute) {
     try {
         if (-not $PSBoundParameters.ContainsKey('Adapters')) { $Adapters = @(Get-CampusAdapters) }
         $local = @($Adapters | Where-Object { $_.IsUp -and $_.IsLocal })
@@ -67,15 +79,27 @@ function Get-CampusNetworkContext([object[]]$Adapters) {
         $localFingerprint = @($Adapters | Where-Object { $_.IsLocal } | Sort-Object Id | ForEach-Object {
             $_.Id + ':' + $_.IsUp + ':' + $_.Mac + ':' + (@($_.Ipv4 | Sort-Object) -join ',') + ':' + (@($_.Gateways | Sort-Object) -join ',')
         }) -join ';'
+        $route = if ($IncludeRoute -and $addressed.Count) { Get-CampusPortalRouteFingerprint } else { '' }
         return [pscustomobject]@{
             Known = $true; HasLink = $local.Count -gt 0; HasIpv4 = $addressed.Count -gt 0
             HasGateway = @($addressed | Where-Object { @($_.Gateways).Count -gt 0 }).Count -gt 0
             VpnActive = @($Adapters | Where-Object { $_.IsUp -and $_.IsTunnel }).Count -gt 0
-            Adapters = @($Adapters); Fingerprint = $fingerprint; LocalFingerprint = $localFingerprint
+            Adapters = @($Adapters); Fingerprint = $fingerprint; LocalFingerprint = $localFingerprint; RouteFingerprint = $route
         }
     } catch {
-        return [pscustomobject]@{ Known = $false; HasLink = $false; HasIpv4 = $false; HasGateway = $false; VpnActive = $false; Adapters = @(); Fingerprint = 'unavailable'; LocalFingerprint = '' }
+        return [pscustomobject]@{ Known = $false; HasLink = $false; HasIpv4 = $false; HasGateway = $false; VpnActive = $false; Adapters = @(); Fingerprint = 'unavailable'; LocalFingerprint = ''; RouteFingerprint = '' }
     }
+}
+
+function Resolve-CampusNetworkEvent($Previous, $Current, [string]$Reason) {
+    if ($null -eq $Previous -or $Reason -in @('Stop', 'Resumed', 'ClockGap')) { return $Reason }
+    if ($Previous.Known -ne $Current.Known -or $Previous.LocalFingerprint -ne $Current.LocalFingerprint -or
+        $Previous.RouteFingerprint -ne $Current.RouteFingerprint) { return 'NetworkChanged' }
+    if (-not $Current.RouteFingerprint -and ($Reason -eq 'NetworkChanged' -or $Previous.Fingerprint -ne $Current.Fingerprint)) {
+        return 'NetworkChanged'
+    }
+    if ($Reason -eq 'NetworkChanged') { return '' }
+    return $Reason
 }
 
 function New-CampusSnapshot([string]$State, [string]$Code, $Network, $Terminal = $null, $Config = $null, [string]$Stage = '', [int]$HttpStatus = 0, [int]$RetryAfterSeconds = 60) {

@@ -1,7 +1,7 @@
 {
   "name": "校园网连接正式版v2",
-  "version": "2.0.0",
-  "releasedOn": "2026-11-08",
+  "version": "2.1.0",
+  "releasedOn": "2026-11-18",
   "releaseType": "script-ui-distribution-update",
   "entryPoint": "打开校园网助手.cmd",
   "appRoot": "app",

@@ -80,6 +80,60 @@ function Set-CampusLocalJson([string]$Path, $Value) {
     } finally { if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force } }
 }
 
+function Read-CampusMonitorState([string]$CredentialPath, $PreviousStatus = $null) {
+    $state = New-CampusMonitorState
+    $state.ProtectionPath = Join-Path ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($CredentialPath))) 'retry-state.json'
+    if (-not (Test-Path -LiteralPath $state.ProtectionPath -ErrorAction Stop)) {
+        # Older v2 status files can identify a server deadline, but did not bind account holds to a revision.
+        if ((Get-CampusField $PreviousStatus 'ReasonCode') -eq 'RateLimited') {
+            $until = ConvertTo-CampusUtcTime (Get-CampusField $PreviousStatus 'NextAttemptUtc')
+            if ($until -gt [datetime]::UtcNow) {
+                $state.RateLimitUntil = $until
+                $state.NextAttempt = $until
+                Sync-CampusRetryProtection $state
+            }
+        }
+        return $state
+    }
+    $record = Read-CampusLocalJson $state.ProtectionPath
+    if ((Get-CampusField $record 'SchemaVersion' 0) -ne 1) { throw '无法读取监测重试记录。' }
+    $state.CredentialRevision = [string]$record.CredentialRevision
+    $state.HoldReason = [string]$record.HoldReason
+    $state.UnclassifiedRejections = [int]$record.UnclassifiedRejections
+    if (($state.HoldReason -or $state.UnclassifiedRejections -gt 0) -and -not $state.CredentialRevision) {
+        throw '监测重试记录缺少账号版本。'
+    }
+    foreach ($name in @('RateLimitUntil', 'SafetyUntil')) {
+        $value = $record.($name + 'Utc')
+        if ($value) {
+            $until = ConvertTo-CampusUtcTime $value
+            if ($null -eq $until) { throw '监测重试记录中的截止时间无效。' }
+            $state.$name = $until
+            if ($until -gt $state.NextAttempt) { $state.NextAttempt = $until }
+        }
+    }
+    $state.SavedProtection = ConvertTo-Json $record -Compress
+    return $state
+}
+
+function Sync-CampusRetryProtection($State) {
+    $now = [datetime]::UtcNow
+    $accountGuard = $State.HoldReason -or $State.UnclassifiedRejections -gt 0
+    $limited = $State.RateLimitUntil -gt $now
+    if (-not ($accountGuard -or $limited -or $State.SavedProtection)) { return }
+    $record = [ordered]@{
+        SchemaVersion = 1
+        CredentialRevision = if ($accountGuard) { $State.CredentialRevision } else { '' }
+        HoldReason = $State.HoldReason
+        UnclassifiedRejections = $State.UnclassifiedRejections
+        SafetyUntilUtc = if ($State.SafetyUntil -gt $now) { $State.SafetyUntil.ToString('o') } else { '' }
+        RateLimitUntilUtc = if ($limited) { $State.RateLimitUntil.ToString('o') } else { '' }
+    }
+    $signature = ConvertTo-Json $record -Compress
+    if ($signature -cne $State.SavedProtection) { Set-CampusLocalJson $State.ProtectionPath $record }
+    $State.SavedProtection = if ($accountGuard -or $limited) { $signature } else { '' }
+}
+
 function Get-CampusUiPreferences([string]$ProjectRoot = $PSScriptRoot) {
     $settings = Read-CampusLocalJson (Get-CampusPaths $ProjectRoot).Preferences
     $enabled = Get-CampusField $settings 'MonitorOnLaunch' $true
